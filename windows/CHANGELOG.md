@@ -22,8 +22,6 @@ LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers 
 
 **Robustness**
 - The watchdog recreates a missing `control\` folder (Users: modify) at start, so the tray can always check in.
-- Before the power cut, Windows is asked to write the system drive out (at most 1.5 s), to give
-  Event Viewer's last entries a chance to survive.
 - Sleep no longer looks like a hang: the supervisor notices the PC was asleep and gives the watchdog a
   fresh 30 s instead of restarting it (found in the real sleep/resume test).
 - The watchdog is now a compiled exe (`LoopMedic.exe`, .NET Framework 4, no install needed) in place of the

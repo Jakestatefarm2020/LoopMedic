@@ -303,30 +303,6 @@ namespace LoopMedic
         [DllImport("ntdll.dll")] public static extern int RtlAdjustPrivilege(int privilege, bool enable, bool currentThread, out bool wasEnabled);
         [DllImport("ntdll.dll")] public static extern int NtShutdownSystem(int action);   // 2 = ShutdownPowerOff
         public const int SeShutdownPrivilege = 19;
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
-        [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr h);
-        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
-
-        // Ask Windows to write everything it's holding for the system drive (Event Viewer keeps recent entries
-        // in memory). Gives up after maxMs so the power-off is never held up for long. True = finished in time.
-        public static bool FlushSystemDrive(int maxMs)
-        {
-            var done = new ManualResetEvent(false);
-            var th = new Thread(delegate ()
-            {
-                try
-                {
-                    string vol = @"\\.\" + Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
-                    IntPtr h = CreateFile(vol, 0x40000000 /* GENERIC_WRITE */, 3 /* share read+write */, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
-                    if (h != new IntPtr(-1)) { FlushFileBuffers(h); CloseHandle(h); }
-                }
-                catch { }
-                done.Set();
-            }) { IsBackground = true };
-            th.Start();
-            return done.WaitOne(maxMs);
-        }
 
         // Can this process get the power-off right? Turns it on, then puts it back as it was.
         public static int CheckShutdownPrivilege()
@@ -1128,11 +1104,11 @@ namespace LoopMedic
             catch { }
             Events.Error(Events.PoweringOff, "LoopMedic is powering off this PC now to protect the hardware: " + o.Reason + ".");
             Log.Write("POWERING OFF NOW (forced, skips Windows Update): " + o.Reason, p);
-            // Give the event log and the log file a moment to reach the disk: ask Windows to write out the system
-            // drive (Event Viewer otherwise loses the last ~30-60 s of entries in a power cut), at most 1.5 s.
-            var flushTimer = Stopwatch.StartNew();
-            Native.FlushSystemDrive(1500);
-            if (flushTimer.ElapsedMilliseconds < 300) Thread.Sleep(300);
+            // Give the log file a moment to reach the disk. Event Viewer keeps its newest entries in the event log
+            // service's own memory, so the trip / power-off entries written in the last ~30-60 s are usually lost
+            // in the cut - flushing the drive doesn't help (tested 25 Nov 2026). The record that survives is
+            // last-poweroff.json -> event 1050 + the tray notice after the restart.
+            Thread.Sleep(1000);
             int r = Native.NtShutdownSystem(2);
             // Only reached if the forced power-off failed.
             Log.Write("NtShutdownSystem failed (0x" + r.ToString("X8") + ", privilege 0x" + priv.ToString("X8") + ") - falling back to shutdown /p /f.", p);

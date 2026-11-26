@@ -193,6 +193,13 @@ log: Event Viewer > Windows Logs > Application, source "LoopMedic".
   1040       Pump slower than usual (warning only)
   1050       "LoopMedic powered off this PC" - read at the next start
 
+  After a power-off, 1010 and 1012 are usually MISSING. Windows keeps the
+  newest Event Viewer entries in memory and loses the last half minute or
+  so when the power is cut - nothing a program can do about it (tested).
+  1050 is the one to look for: it's written after the restart, from
+  LoopMedic's own record, which is saved to disk before the power-off.
+  loopmedic.log has every line too.
+
 Other lines you may see in the log (none of them powers anything off):
   Pump jump: 2400 -> 4600 -> 2400 rpm (one reading, came straight back
              - ignored)
@@ -243,8 +250,8 @@ PUMP READINGS: WHAT THE NUMBER REALLY MEANS
 IF IT EVER FIRES
 --------------------------------------------------------------------------
 
-A red alarm says "PUMP FAILURE DETECTED" or "CPU TEMPERATURE LIMIT
-REACHED" and counts down 30 seconds:
+An alarm near the top of the screen says "PUMP FAILURE DETECTED" or
+"CPU TEMPERATURE LIMIT REACHED" and counts down 30 seconds:
 
   [Shut down now]     cuts power immediately
   [Cancel shutdown]   false alarm? stops it; LoopMedic re-arms in 2 min
@@ -262,7 +269,12 @@ PC hard again.
 
 The power-off comes from the background watchdog, not the tray app - so
 even if the tray icon was closed, the PC still powers off. Windows' own
-shutdown timer is set as a backup too.
+shutdown timer is set as a backup too: that's the "You're about to be
+signed out" box in the middle of the screen. Clicking its "Close" only
+hides it - it doesn't cancel or speed anything up. [Cancel shutdown] in
+LoopMedic's alarm cancels both.
+If the tray app isn't running, a plain Windows message box with an OK
+button shows the warning instead.
 
 If the CPU is cool (under 60 C) when the pump stops, LoopMedic waits up
 to 60 seconds instead of 10 (a cooler firmware update can stop the pump
@@ -271,10 +283,11 @@ briefly). As soon as the CPU warms past 60 C, the normal 10 seconds apply.
   "WHY DID MY PC TURN OFF?"
   If LoopMedic powered your PC off, it says so the next time you sign in:
   a notification "LoopMedic powered off this PC" with the time and the
-  reason, an orange line in the panel for a week, event 1050 in Event
-  Viewer, and the full story in loopmedic.log.
+  reason (it stays on screen until you dismiss it, then in the
+  notification center), an orange line in the panel for 24 hours, event
+  1050 in Event Viewer, and the full story in loopmedic.log.
   No notification = it wasn't LoopMedic (look in Event Viewer > System
-  for "Kernel-Power" or "unexpected shutdown" instead).
+  for event 6008 "unexpected shutdown" or "Kernel-Power" instead).
 
 
 --------------------------------------------------------------------------

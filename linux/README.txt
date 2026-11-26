@@ -189,7 +189,7 @@ IF IT EVER FIRES
   "WHY DID MY PC TURN OFF?"
   If LoopMedic powered it off, the tray says so at your next login
   ("LoopMedic powered off this PC", with the time and reason), the panel
-  shows it for a week, and journalctl -t loopmedic -p warning -b -1 shows
+  shows it for 24 hours, and journalctl -t loopmedic -p warning -b -1 shows
   the trip from the previous boot. No notification = it wasn't LoopMedic.
 
 
