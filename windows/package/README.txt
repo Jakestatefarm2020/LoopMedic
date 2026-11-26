@@ -71,7 +71,9 @@ INSTALL (about 3 minutes)
 
 2. Follow the 5 steps on screen:
 
-   Step 1 - Unblocks the files. Automatic.
+   Step 1 - Unblocks the files and builds LoopMedic from its source code
+            (with the compiler built into Windows - nothing to install).
+            Automatic, about 10 seconds.
 
    Step 2 - Checks the sensor driver. If PawnIO is missing, it offers to
             install it. Say Y.
@@ -394,19 +396,21 @@ WHAT'S IN THIS FOLDER
   Install.bat              Guided setup + install (run this)
   Uninstall.bat            Removes LoopMedic (and the tray icon)
   Watch-Pump.bat           Live fan speeds, to find your pump
-  LoopMedic.exe            The watchdog + its power-off helper
-  LoopMedic.exe.config     Tells it where the sensor library is
-  LoopMedicTray.exe        The tray icon app (installed for you)
+  src\LoopMedic.cs         Source code: the watchdog + power-off helper
+  tray\LoopMedicTray.cs    Source code: the tray icon app
+  build.ps1                Builds both into bin\ (setup runs it for you)
   Setup-LoopMedic.ps1      \
   Install-LoopMedic.ps1     > The scripts the .bat files run
   Watch-Pump.ps1           /
+  Update-LoopMedic.ps1     Used by the tray's "Update now" (keeps settings)
   config.json              Your settings (written by setup)
   cpu-limits.json          The CPU temperature table
   lhm\                     LibreHardwareMonitor sensor library
-                           (see THIRD-PARTY-NOTICES.txt)
   pawnio\                  Official PawnIO driver installer + its license
+  THIRD-PARTY-NOTICES.txt  Licenses of the two parts above
   LICENSE.md               LoopMedic's license (free for personal,
                            non-commercial use)
+  CHANGELOG.md             What changed in each version
   README.txt               This file
 
 Once installed, the running copy lives in C:\ProgramData\LoopMedic

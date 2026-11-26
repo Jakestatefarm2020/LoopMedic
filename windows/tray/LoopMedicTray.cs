@@ -2,7 +2,7 @@
 // Shows LoopMedic's status (written by the SYSTEM watchdog to status.json) as a
 // tray icon + panel, and a pop-up with a countdown when it trips.
 // The watchdog does the actual shutdown, so protection never depends on this app.
-// Build: csc /target:winexe /r:System.Web.Extensions.dll LoopMedicTray.cs (see build.ps1)
+// Build: ..\build.ps1 (the in-box .NET Framework compiler; it lists the references this file needs)
 
 using System;
 using System.Collections.Generic;

@@ -1,6 +1,6 @@
 <#
 LoopMedic by Jacob Stiltner, (c) 2026 - guided setup. Start it with Install.bat (that asks for admin).
-Steps: unblock files -> check PawnIO driver -> pick the pump sensor ->
+Steps: unblock files + build (build.ps1) -> check PawnIO driver -> pick the pump sensor ->
 choose the CPU temperature limit -> safe test (no shutdown) -> install.
 #>
 $ErrorActionPreference = 'Stop'

@@ -54,11 +54,12 @@ How the Windows version is put together, including its threat model:
 ### Building from source
 
 - **Windows:** put the [LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-  0.9.6 DLLs in `windows/lhm/` and the signed [PawnIO](https://pawnio.eu) installer in
-  `windows/package/pawnio/`, then run `windows/build.ps1`. `windows/tests/run-tests.py` runs the
+  0.9.6 DLLs in `windows/lhm/`, then run `windows/build.ps1`. `windows/tests/run-tests.py` runs the
   test scenarios against the built exe (simulated sensors, never powers off).
 - **Linux:** nothing to build. `linux/tests/run-tests.py` runs the test scenarios.
-- **Release packages:** `python tools/pack-release.py [output folder]`.
+- **Release packages:** `python tools/pack-release.py [output folder]`. Also needs the signed
+  [PawnIO](https://pawnio.eu) installer in `windows/package/pawnio/` and the release signing key. Only the
+  author has the key, so packages you build yourself won't be accepted by the trays' updater.
 
 ## License
 

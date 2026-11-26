@@ -14,6 +14,8 @@ Task Scheduler (SYSTEM, at startup + every 5 min "is it running?", restart after
 LoopMedicTray.exe (the signed-in user, not elevated)   reads status.json, writes requests to control\
 ```
 
+The tray only goes online when the user clicks the version number in the panel (see Updates).
+
 - **Supervisor.** Restarts a worker that exits within 2 s. If status.json hasn't changed for 30 s (after a
   60 s start-up allowance), the worker is treated as frozen, killed and restarted. Exit codes 2–4 (config or
   sensor problems) and more than 5 restarts in 2 minutes back off to 30 s. Each restart logs event 1030.
@@ -21,6 +23,16 @@ LoopMedicTray.exe (the signed-in user, not elevated)   reads status.json, writes
 - **Helper.** A separate process, so the countdown survives a worker crash. On a real trip it also sets
   `shutdown /s /f /t <delay+60>` as a backup timer. Cancelling aborts both.
 - **Tray.** Purely a viewer and remote control. Protection never depends on it.
+
+## Updates
+
+Clicking the version number asks the GitHub API for the latest release of `Jakestatefarm2020/LoopMedic`.
+If it is newer, the tray shows the release notes and, on **Update now**, downloads `LoopMedic.zip` and
+`LoopMedic.zip.sig` to %TEMP% and checks the signature: RSA-3072, PKCS#1 v1.5 over SHA-256, against the
+public key compiled into the tray. Only then does it unzip and start `Update-LoopMedic.ps1` elevated (UAC).
+That builds the new version, keeps the current `config.json` (adding any new setting with its default)
+and runs the installer. `tools/pack-release.py` signs the packages with the private key, which is never in
+this repo. The Linux tray does the same with `LoopMedic-Linux.tar.gz(.sig)` and pkexec.
 
 ## Files
 
@@ -72,6 +84,7 @@ write time, and files dated more than 5 min in the future are ignored.
 | A non-admin user stopping protection | can only write to `control\`. **Pause is the known lever:** any local user can pause for up to 2 h at a time and re-write it. Accepted: the tool assumes the users of the PC aren't hostile to it. It is a safety tool, not a security boundary. |
 | A malicious `control\` file | only a date is parsed. Size and type limits apply, and symlinks are refused on Linux. |
 | Tampering with the program files | admin-only ACL. The SYSTEM task never runs anything a normal user can edit. |
+| A fake or altered update (hijacked account, swapped download) | refused unless signed with the release key, which never leaves the author's PC. The first download from the Releases page is trusted as-is (HTTPS from GitHub). |
 | Sensor noise / bad tach | jump rule; only a *stopped* pump trips |
 | Pulse-count mismatch (rpm wrong by 2×) | only a *stopped* pump trips. Slow = warning. |
 | A pump spinning without flow | CPU temperature trip only |
