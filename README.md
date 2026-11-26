@@ -2,6 +2,8 @@
 
 **Powers your PC off if your AIO pump stops, before the CPU cooks.**
 
+<p align="center"><img src="docs/panel.png" alt="The LoopMedic tray panel: live pump speed and CPU temperature with graphs, trip limits, today's peaks and every fan header" width="340"></p>
+
 LoopMedic runs quietly in the background from startup. Every 2 seconds it reads the pump speed
 (from the motherboard fan header the pump's speed cable plugs into) and the CPU temperature.
 
