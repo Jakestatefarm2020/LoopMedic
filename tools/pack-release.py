@@ -11,7 +11,7 @@ Needs, besides the repo:
 Optional: tools/private-patterns.txt (git-ignored), one regex per line - extra words that must never
 ship (your name, email, hardware). Generic checks for personal paths always run.
 """
-import os, re, shutil, sys, tarfile, zipfile
+import base64, hashlib, json, os, re, shutil, sys, tarfile, zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIN = os.path.join(ROOT, "windows")
@@ -47,6 +47,7 @@ WIN_FILES = {  # release path: path in windows/
     "Setup-LoopMedic.ps1": "package/Setup-LoopMedic.ps1", "README.txt": "package/README.txt",
     "THIRD-PARTY-NOTICES.txt": "package/THIRD-PARTY-NOTICES.txt", "config.json": "package/config.template.json",
     "Install-LoopMedic.ps1": "Install-LoopMedic.ps1", "build.ps1": "build.ps1", "cpu-limits.json": "cpu-limits.json",
+    "Update-LoopMedic.ps1": "package/Update-LoopMedic.ps1",
     "src/LoopMedic.cs": "src/LoopMedic.cs", "tray/LoopMedicTray.cs": "tray/LoopMedicTray.cs",
     "LICENSE.md": LICENSE, "CHANGELOG.md": "CHANGELOG.md",
 }
@@ -103,6 +104,32 @@ with tarfile.open(ltgz, "w:gz") as tar:
         ti.uid = ti.gid = 1000; ti.uname = ti.gname = "user"
         with open(p, "rb") as fh:
             tar.addfile(ti, fh)
+
+# ------------------------------------------------------------------ signatures (for the trays' update check)
+# RSA PKCS#1 v1.5 over SHA-256, base64 in <package>.sig. The private key lives OUTSIDE the repo; the trays
+# carry the public half and refuse an update whose signature doesn't check out.
+KEY = os.environ.get("LOOPMEDIC_SIGNING_KEY") or os.path.join(os.path.expanduser("~"), "Documents", "LoopMedic-signing", "release-key.json")
+SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def pkcs1(data, k):
+    di = SHA256_PREFIX + hashlib.sha256(data).digest()
+    return b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
+
+
+if os.path.exists(KEY):
+    key = json.load(open(KEY, encoding="utf-8"))
+    n, e, d = (int(key[x], 16) for x in ("n", "e", "d"))
+    k = (n.bit_length() + 7) // 8
+    for pkg in (wzip, ltgz):
+        data = open(pkg, "rb").read()
+        sig = pow(int.from_bytes(pkcs1(data, k), "big"), d, n).to_bytes(k, "big")
+        if pow(int.from_bytes(sig, "big"), e, n).to_bytes(k, "big") != pkcs1(data, k):   # check our own work
+            problems.append(f"{pkg}: signature didn't verify")
+        open(pkg + ".sig", "w").write(base64.b64encode(sig).decode() + "\n")
+        print("signed", os.path.basename(pkg))
+else:
+    problems.append("signing key not found (" + KEY + ") - packages are NOT signed; the trays' updater will refuse them")
 
 print("Windows zip:", os.path.getsize(wzip), "bytes,", len(zipfile.ZipFile(wzip).namelist()), "files")
 print("Linux tar.gz:", os.path.getsize(ltgz), "bytes")

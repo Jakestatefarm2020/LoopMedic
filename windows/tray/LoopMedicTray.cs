@@ -14,6 +14,9 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Media;
+using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -161,6 +164,7 @@ namespace LoopMedicTray
         public static readonly Color Amber = Color.FromArgb(240, 168, 48);
         public static readonly Color Red = Color.FromArgb(229, 72, 77);
         public static readonly Color Blue = Color.FromArgb(76, 154, 255);
+        public static readonly Color Link = Color.FromArgb(122, 176, 255);   // gentle link blue (version = update check)
         public static readonly Color Grey = Color.FromArgb(138, 143, 152);
         public static readonly Color Off = Color.FromArgb(90, 90, 98);
 
@@ -276,6 +280,7 @@ namespace LoopMedicTray
             timer.Tick += delegate { Tick(); };
             timer.Start();
             Tick();
+            NotifyIfUpdated();
         }
 
         void Tick()
@@ -396,7 +401,7 @@ namespace LoopMedicTray
 
         [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
-        static Icon MakeIcon(string state)
+        public static Icon MakeIcon(string state)
         {
             using (var bmp = Shield(Math.Max(SystemInformation.SmallIconSize.Width, 16), state))
             {
@@ -473,6 +478,44 @@ namespace LoopMedicTray
         }
         public void OpenLog() { try { Process.Start("notepad.exe", "\"" + logPath + "\""); } catch { } }
         public void Balloon(string text) { ni.ShowBalloonTip(4000, "LoopMedic", text, ToolTipIcon.Info); }
+
+        // ---- updates (only when the user clicks the version in the panel; nothing checks in the background)
+        readonly Control ui = new Control();   // hands results from the download thread back to the UI thread
+        UpdateForm updateForm;
+        public void CheckForUpdates()
+        {
+            if (Updater.Busy) return;
+            if (updateForm != null && !updateForm.IsDisposed) { updateForm.Activate(); return; }
+            if (!ui.IsHandleCreated) ui.CreateControl();
+            string current = Current.Version.Length > 0 ? Current.Version : Updater.TrayVersion;
+            if (panel != null) panel.Invalidate();
+            Updater.Check(current, delegate (Updater.Release rel, string error)
+            {
+                ui.BeginInvoke((Action)delegate
+                {
+                    if (panel != null) panel.Invalidate();
+                    if (error != null) Notice("LoopMedic - couldn't check for updates", error, false, ToolTipIcon.Warning);
+                    else if (rel == null) Notice("LoopMedic is up to date", "You're on the latest version (" + current + ").", false, ToolTipIcon.Info);
+                    else { updateForm = new UpdateForm(this, current, rel); updateForm.Show(); updateForm.Activate(); }
+                });
+            });
+        }
+        public void RunOnUi(Action a) { if (!ui.IsHandleCreated) ui.CreateControl(); ui.BeginInvoke(a); }
+
+        // After an update the new tray says so once.
+        void NotifyIfUpdated()
+        {
+            try
+            {
+                string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LoopMedic", "last-version.txt");
+                string before = File.Exists(f) ? File.ReadAllText(f).Trim() : "";
+                if (before == Updater.TrayVersion) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(f));
+                File.WriteAllText(f, Updater.TrayVersion);
+                if (before.Length > 0) Notice("LoopMedic updated", "Now running version " + Updater.TrayVersion + " (was " + before + "). Your settings were kept.", false, ToolTipIcon.Info);
+            }
+            catch { }
+        }
 
         public void CancelShutdown(bool isTest)
         {
@@ -595,11 +638,16 @@ namespace LoopMedicTray
                 using (var fHead = new Font("Segoe UI Semibold", 16f * S, GraphicsUnit.Pixel))
                 {
                     g.DrawString("LoopMedic", fHead, bText, pad, y);
-                    if (st.Version.Length > 0)
-                    {
-                        var hs = g.MeasureString("LoopMedic", fHead);
-                        g.DrawString("v" + st.Version, fTiny, bDim, pad + hs.Width, y + hs.Height - g.MeasureString("v", fTiny).Height - 3 * S);
-                    }
+                    // The version doubles as "check for updates": soft blue + hand cursor on hover, click to check.
+                    string ver = st.Version.Length > 0 ? st.Version : Updater.TrayVersion;
+                    var hs = g.MeasureString("LoopMedic", fHead);
+                    string vtext = Updater.Busy ? "v" + ver + "  checking..." : "v" + ver;
+                    var vs = g.MeasureString(vtext, fTiny);
+                    var vr = new RectangleF(pad + hs.Width, y + hs.Height - vs.Height - 3 * S, vs.Width, vs.Height);
+                    var link = new Btn { Rect = RectangleF.Inflate(vr, 2 * S, 3 * S), Text = "#version", Click = delegate { app.CheckForUpdates(); } };
+                    buttons.Add(link);
+                    using (var vb = new SolidBrush(hover != null && hover.Text == "#version" ? Theme.Link : Theme.Dim))
+                        g.DrawString(vtext, fTiny, vb, vr.X, vr.Y);
                 }
 
                 // state pill
@@ -786,6 +834,221 @@ namespace LoopMedicTray
     }
 
     // ------------------------------------------------------------------ trip pop-up
+    // Update check (only when the user clicks the version in the panel). Asks GitHub for the latest release,
+    // downloads LoopMedic.zip + LoopMedic.zip.sig, and refuses anything the release key didn't sign.
+    static class Updater
+    {
+        public const string Repo = "Jakestatefarm2020/LoopMedic";
+        // Public half of the LoopMedic release signing key (RSA-3072). The private half never leaves the author's
+        // PC; a release that wasn't signed with it is never installed, even if someone got into the GitHub account.
+        const string KeyModulus = "90PksaPHuTI9JIRU4CFL7dWDKaUDSGOrGCzGP8uwaAW8UqZsEfGJY9aeQY9cI1NcPOrwDWSBJZgkYC3brpgKLwzt1RCtwGS4+cuB/bEsYfFj7y5wUv58k/iXxSwJhYZhrVBhnoU48g/FEL/oZyQrqJsLw139aAW54AxxFS4Q2fehI2nFuTiB6vRvOQILXvW756vnuccAILq1Duxfn+pZpfZq5111pfFopqaJaE1y9nEZ98trjDCgJuXI9WSIS2enYprBs3Wh34tkbjrOV/pPjzHxiuZUD7i+xfS2UhMmUwTQ5ifyL3kmNO7mVnoKxshSen5JhEhhnN5XQCNa3Y3PcGEV+CTrZn4hs1aNp4PX7HZyA1nu6XFOMVn8G5Sy+Meq4YxrvwZuQ1KPpReTIsyCv4gHhOfZJVgiNvHIvmH7L5TywQnYhV5EMc0rt/VJNw+fCOCjAeHdHWUpiaGb5WpAqziWP3ExDppYTjpGo7cmf38wHBxSNomRqOl6WXpjLZnF";
+        const string KeyExponent = "AQAB";
+
+        public class Release { public string Version, Notes, PageUrl, ZipUrl, SigUrl; }
+        public static volatile bool Busy;
+        public static string TrayVersion
+        {
+            get { var v = Assembly.GetExecutingAssembly().GetName().Version; return v.Major + "." + v.Minor + "." + v.Build; }
+        }
+
+        static WebClient Client()
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;   // TLS 1.2 (GitHub requires it)
+            var wc = new WebClient();
+            wc.Headers[HttpRequestHeader.UserAgent] = "LoopMedic-tray";
+            return wc;
+        }
+
+        // done(release, error): release = null and error = null means "up to date".
+        public static void Check(string current, Action<Release, string> done)
+        {
+            Busy = true;
+            new Thread(delegate ()
+            {
+                Release found = null; string error = null;
+                try
+                {
+                    string json;
+                    using (var wc = Client())
+                    {
+                        wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                        json = wc.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
+                    }
+                    var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                    string tag = d.ContainsKey("tag_name") ? d["tag_name"] as string ?? "" : "";
+                    var r = new Release
+                    {
+                        Version = tag.TrimStart('v', 'V'),
+                        Notes = d.ContainsKey("body") ? d["body"] as string ?? "" : "",
+                        PageUrl = d.ContainsKey("html_url") ? d["html_url"] as string : "https://github.com/" + Repo + "/releases"
+                    };
+                    var assets = d.ContainsKey("assets") ? d["assets"] as System.Collections.ArrayList : null;
+                    if (assets != null)
+                        foreach (var o in assets)
+                        {
+                            var a = o as Dictionary<string, object>;
+                            if (a == null) continue;
+                            string name = a["name"] as string, url = a["browser_download_url"] as string;
+                            if (name == "LoopMedic.zip") r.ZipUrl = url;
+                            if (name == "LoopMedic.zip.sig") r.SigUrl = url;
+                        }
+                    Version vNew, vNow;
+                    if (Version.TryParse(r.Version, out vNew) && Version.TryParse(current, out vNow) && vNew > vNow) found = r;
+                }
+                catch (WebException e)
+                {
+                    var resp = e.Response as HttpWebResponse;
+                    error = resp != null && resp.StatusCode == HttpStatusCode.NotFound ? "No release has been published on GitHub yet."
+                          : "Couldn't reach GitHub (" + e.Message + ").";
+                }
+                catch (Exception e) { error = "Unexpected answer from GitHub (" + e.Message + ")."; }
+                finally { Busy = false; }
+                done(found, error);
+            }) { IsBackground = true }.Start();
+        }
+
+        // Download + signature check + unzip. Returns the new version's Update-LoopMedic.ps1, or throws a readable message.
+        public static string Download(Release r, Action<string> progress)
+        {
+            if (r.ZipUrl == null || r.SigUrl == null) throw new Exception("This release has no signed Windows package - download it from GitHub instead.");
+            string dir = Path.Combine(Path.GetTempPath(), "LoopMedic-update-" + r.Version);
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            Directory.CreateDirectory(dir);
+            byte[] zip, sig;
+            using (var wc = Client())
+            {
+                progress("Downloading LoopMedic " + r.Version + "...");
+                zip = wc.DownloadData(r.ZipUrl);
+                sig = Convert.FromBase64String(wc.DownloadString(r.SigUrl).Trim());
+            }
+            progress("Checking the signature...");
+            if (!Verify(zip, sig))
+                throw new Exception("The download FAILED the signature check, so it was not installed. Please tell the author.");
+            string zp = Path.Combine(dir, "LoopMedic.zip");
+            File.WriteAllBytes(zp, zip);
+            progress("Unpacking...");
+            System.IO.Compression.ZipFile.ExtractToDirectory(zp, Path.Combine(dir, "x"));
+            string script = Path.Combine(dir, "x", "LoopMedic", "Update-LoopMedic.ps1");
+            if (!File.Exists(script)) throw new Exception("The package has no updater - download it from GitHub and run Install.bat.");
+            return script;
+        }
+
+        public static bool Verify(byte[] data, byte[] sig)
+        {
+            try
+            {
+                using (var rsa = new RSACryptoServiceProvider())
+                using (var sha = SHA256.Create())
+                {
+                    rsa.ImportParameters(new RSAParameters { Modulus = Convert.FromBase64String(KeyModulus), Exponent = Convert.FromBase64String(KeyExponent) });
+                    return rsa.VerifyHash(sha.ComputeHash(data), CryptoConfig.MapNameToOID("SHA256"), sig);
+                }
+            }
+            catch { return false; }
+        }
+    }
+
+    // "LoopMedic x.y is available" window: what's new, Update now / Later, link to the full changelog.
+    class UpdateForm : Form
+    {
+        readonly TrayContext app;
+        readonly Updater.Release rel;
+        readonly Label status;
+        readonly Button bUpdate, bLater;
+
+        public UpdateForm(TrayContext app, string current, Updater.Release rel)
+        {
+            this.app = app;
+            this.rel = rel;
+            float S = Theme.Scale();
+            Text = "LoopMedic update";
+            Icon = TrayContext.MakeIcon("ARMED");
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            TopMost = true;
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
+            Font = new Font("Segoe UI", 11f * S, GraphicsUnit.Pixel);
+            ClientSize = new Size((int)(460 * S), (int)(340 * S));
+            int pad = (int)(18 * S), w = ClientSize.Width - pad * 2;
+
+            var title = new Label { Text = "LoopMedic " + rel.Version + " is available", Font = new Font("Segoe UI Semibold", 16f * S, GraphicsUnit.Pixel),
+                                    Location = new Point(pad, pad), Size = new Size(w, (int)(26 * S)) };
+            var sub = new Label { Text = "You have " + current + ". Updating keeps your settings.", ForeColor = Theme.Dim,
+                                  Location = new Point(pad, pad + (int)(30 * S)), Size = new Size(w, (int)(18 * S)) };
+            var head = new Label { Text = "WHAT'S NEW", Font = new Font("Segoe UI Semibold", 10f * S, GraphicsUnit.Pixel), ForeColor = Theme.Dim,
+                                   Location = new Point(pad, pad + (int)(60 * S)), Size = new Size(w, (int)(16 * S)) };
+            var notes = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
+                                      BackColor = Theme.Card, ForeColor = Theme.Text, Text = Clean(rel.Notes), TabStop = false,
+                                      Location = new Point(pad, pad + (int)(80 * S)), Size = new Size(w, (int)(150 * S)) };
+            var link = new LinkLabel { Text = "Full changelog on GitHub", LinkColor = Theme.Link, ActiveLinkColor = Theme.Blue, VisitedLinkColor = Theme.Link,
+                                       LinkBehavior = LinkBehavior.HoverUnderline, AutoSize = true, Location = new Point(pad, pad + (int)(238 * S)) };
+            link.LinkClicked += delegate { try { Process.Start(rel.PageUrl); } catch { } };
+            status = new Label { ForeColor = Theme.Dim, Location = new Point(pad, pad + (int)(258 * S)), Size = new Size(w, (int)(18 * S)) };
+            int bh = (int)(32 * S), bw = (int)(120 * S), by = ClientSize.Height - pad - bh;
+            bLater = Flat("Later", Theme.Card, new Rectangle(ClientSize.Width - pad - bw, by, bw, bh));
+            bUpdate = Flat("Update now", Theme.Blue, new Rectangle(ClientSize.Width - pad - bw * 2 - (int)(8 * S), by, bw, bh));
+            bLater.Click += delegate { Close(); };
+            bUpdate.Click += delegate { StartUpdate(); };
+            Controls.AddRange(new Control[] { title, sub, head, notes, link, status, bUpdate, bLater });
+            AcceptButton = bUpdate;
+            CancelButton = bLater;
+        }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Theme.RoundCorners(this); }
+
+        static Button Flat(string text, Color bg, Rectangle r)
+        {
+            var b = new Button { Text = text, FlatStyle = FlatStyle.Flat, BackColor = bg, ForeColor = Color.White, Bounds = r, Cursor = Cursors.Hand };
+            b.FlatAppearance.BorderSize = 0;
+            return b;
+        }
+
+        // Release notes are Markdown; show them as plain text.
+        static string Clean(string md)
+        {
+            if (string.IsNullOrEmpty(md)) return "(no notes for this release)";
+            var lines = md.Replace("\r\n", "\n").Split('\n')
+                          .Select(l => System.Text.RegularExpressions.Regex.Replace(l, @"^#+\s*", "").Replace("**", "").Replace("`", ""));
+            return string.Join("\r\n", lines.ToArray()).Trim();
+        }
+
+        void StartUpdate()
+        {
+            bUpdate.Enabled = bLater.Enabled = false;
+            status.ForeColor = Theme.Dim;
+            new Thread(delegate ()
+            {
+                try
+                {
+                    string script = Updater.Download(rel, s => app.RunOnUi(delegate { status.Text = s; }));
+                    app.RunOnUi(delegate { Launch(script); });
+                }
+                catch (Exception ex)
+                {
+                    app.RunOnUi(delegate { status.Text = ex.Message; status.ForeColor = Theme.Amber; bUpdate.Enabled = bLater.Enabled = true; });
+                }
+            }) { IsBackground = true }.Start();
+        }
+
+        void Launch(string script)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"") { Verb = "runas", UseShellExecute = true });
+                status.Text = "Installing - LoopMedic restarts in a moment. You can close this.";
+                bLater.Text = "Close";
+                bLater.Enabled = true;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                status.Text = "Update cancelled - Windows didn't get admin permission.";
+                status.ForeColor = Theme.Amber;
+                bUpdate.Enabled = bLater.Enabled = true;
+            }
+        }
+    }
+
     // Windows toast notifications. A desktop app needs an app ID registered under HKCU for them to show with a
     // name + icon and stay in the notification center. Any failure (older Windows, policy) returns false and the
     // caller falls back to a tray balloon.

@@ -43,6 +43,10 @@ LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers 
 - The safe test runs the exe in a temporary folder.
 
 **Tray**
+- **Updates:** click the version number at the top of the panel to check GitHub for a newer release. If there is one,
+  a window shows what's new; **Update now** downloads it, checks its RSA signature against the release key built into
+  the tray (a changed download is refused), and installs it with your settings kept. The new tray says "updated" once.
+  Nothing checks in the background.
 - Notifications are real Windows notifications now: they stay in the notification center, and the
   "LoopMedic powered off this PC" one stays on screen until dismissed (falls back to a tray balloon).
 - The trip alarm opens near the top of the screen, so Windows' own "You're about to be signed out" box

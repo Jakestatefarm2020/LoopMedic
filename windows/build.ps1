@@ -42,7 +42,8 @@ $trayArgs = @('/target:winexe', "/out:$out2", '/r:System.Drawing.dll', '/r:Syste
 # Windows toast notifications (WinRT): the metadata ships with Windows 10/11.
 $wm = Join-Path $env:WINDIR 'System32\WinMetadata'
 $trayArgs += @("/r:$(Join-Path $wm 'Windows.UI.winmd')", "/r:$(Join-Path $wm 'Windows.Data.winmd')", "/r:$(Join-Path $wm 'Windows.Foundation.winmd')",
-               "/r:$(Join-Path $fw 'System.Runtime.dll')", "/r:$(Join-Path $fw 'System.Runtime.WindowsRuntime.dll')")
+               "/r:$(Join-Path $fw 'System.Runtime.dll')", "/r:$(Join-Path $fw 'System.Runtime.WindowsRuntime.dll')",
+               '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll')   # update download: unzip
 $ico = Join-Path $here 'tray\LoopMedic.ico'
 if (Test-Path $ico) { $trayArgs += "/win32icon:$ico" }
 & $csc @common @trayArgs (Join-Path $here 'tray\LoopMedicTray.cs')

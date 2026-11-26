@@ -40,6 +40,10 @@ LoopMedic for Linux. The Windows version (../windows) keeps the same version num
 - The safe test runs the exe in a temporary folder.
 
 **Tray**
+- **Updates:** click the version number at the top of the panel to check GitHub for a newer release. If there is one,
+  a window shows what's new; **Update now** downloads it, checks its RSA signature against the release key built into
+  the tray (a changed download is refused), and installs it with your settings kept. The new tray says "updated" once.
+  Nothing checks in the background.
 - The pump graph keeps headroom of 10% of the speed above and below the line, so the sensor's normal
   one-reading wiggles (a few %) show as small ticks instead of filling the graph. Every reading is still shown.
 

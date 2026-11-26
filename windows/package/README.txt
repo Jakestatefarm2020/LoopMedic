@@ -149,6 +149,14 @@ under the ^ arrow - drag it onto the taskbar to keep it visible).
   Right-click  the same actions + "Exit tray icon"
                (exiting only hides the icon - protection keeps running)
 
+UPDATES: click the version number (e.g. "v2.2.0") at the top of the panel.
+It turns blue when you point at it. LoopMedic asks GitHub for the newest
+version and either says you're up to date or shows what's new with an
+"Update now" button. Update now downloads it, checks it is genuinely
+signed by the author (a changed or fake download is refused), then asks
+for admin permission and installs it. Your settings are kept. Nothing
+checks for updates by itself.
+
 TRY IT: right-click the shield > Run test. A blue TEST alarm shows what a
 real trip looks like. Nothing powers off.
 
@@ -343,6 +351,9 @@ After any of these, plus big Windows feature updates, or installing /
 removing other hardware-monitor apps (FanControl, HWiNFO, OpenRGB,
 Armoury Crate...): check the shield is GREEN and the panel says "Live".
 Orange "?" or a notification = run Install.bat again.
+
+Updating LoopMedic itself: click the version number in the panel (see
+THE TRAY ICON). By hand: unzip the new LoopMedic.zip and run Install.bat.
 
 
 --------------------------------------------------------------------------

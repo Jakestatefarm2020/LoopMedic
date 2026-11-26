@@ -15,19 +15,125 @@ Options (mostly for testing):
   --shot-panel PNG / --shot-trip PNG         render to a picture and exit
 """
 import argparse
+import base64
+import getpass
+import grp
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QIcon,
-                           QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetricsF, QGuiApplication,
+                           QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 AUTHOR = "by Jacob Stiltner"
+
+try:
+    from loopmedic import VERSION as TRAY_VERSION   # loopmedic.py sits next to this file (/opt/loopmedic)
+except Exception:
+    TRAY_VERSION = "0"
+
+# ------------------------------------------------------------------ updates
+# Only when the user clicks the version in the panel. Asks GitHub for the latest release, downloads
+# LoopMedic-Linux.tar.gz + .sig and refuses anything the LoopMedic release key didn't sign.
+REPO = "Jakestatefarm2020/LoopMedic"
+# Public half of the release signing key (RSA-3072); the private half never leaves the author's PC.
+KEY_N = int.from_bytes(base64.b64decode(
+    "90PksaPHuTI9JIRU4CFL7dWDKaUDSGOrGCzGP8uwaAW8UqZsEfGJY9aeQY9cI1NcPOrwDWSBJZgkYC3brpgKLwzt1RCtwGS4+cuB/bEsYfFj7y5wUv58k/iXxSwJ"
+    "hYZhrVBhnoU48g/FEL/oZyQrqJsLw139aAW54AxxFS4Q2fehI2nFuTiB6vRvOQILXvW756vnuccAILq1Duxfn+pZpfZq5111pfFopqaJaE1y9nEZ98trjDCgJuXI"
+    "9WSIS2enYprBs3Wh34tkbjrOV/pPjzHxiuZUD7i+xfS2UhMmUwTQ5ifyL3kmNO7mVnoKxshSen5JhEhhnN5XQCNa3Y3PcGEV+CTrZn4hs1aNp4PX7HZyA1nu6XFO"
+    "MVn8G5Sy+Meq4YxrvwZuQ1KPpReTIsyCv4gHhOfZJVgiNvHIvmH7L5TywQnYhV5EMc0rt/VJNw+fCOCjAeHdHWUpiaGb5WpAqziWP3ExDppYTjpGo7cmf38wHBxS"
+    "NomRqOl6WXpjLZnF"), "big")
+KEY_E = 65537
+SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def verify_signature(data, sig):
+    """RSA PKCS#1 v1.5 / SHA-256 check against the built-in release key (standard library only)."""
+    k = (KEY_N.bit_length() + 7) // 8
+    if len(sig) != k:
+        return False
+    di = SHA256_PREFIX + hashlib.sha256(data).digest()
+    expected = b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
+    return pow(int.from_bytes(sig, "big"), KEY_E, KEY_N).to_bytes(k, "big") == expected
+
+
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("vV").split("."))
+    except ValueError:
+        return None
+
+
+def http_get(url, accept=None):
+    headers = {"User-Agent": "LoopMedic-tray"}
+    if accept:
+        headers["Accept"] = accept
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
+        return r.read()
+
+
+def check_latest(current):
+    """Returns (release dict or None if up to date, error text or None)."""
+    try:
+        d = json.loads(http_get(f"https://api.github.com/repos/{REPO}/releases/latest", "application/vnd.github+json"))
+    except urllib.error.HTTPError as e:
+        return None, "No release has been published on GitHub yet." if e.code == 404 else f"GitHub answered {e.code}."
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, f"Couldn't reach GitHub ({e})."
+    rel = {"version": str(d.get("tag_name") or "").lstrip("vV"), "notes": d.get("body") or "",
+           "page": d.get("html_url") or f"https://github.com/{REPO}/releases"}
+    for a in d.get("assets") or []:
+        if a.get("name") == "LoopMedic-Linux.tar.gz":
+            rel["pkg"] = a.get("browser_download_url")
+        if a.get("name") == "LoopMedic-Linux.tar.gz.sig":
+            rel["sig"] = a.get("browser_download_url")
+    new, now = version_tuple(rel["version"]), version_tuple(current)
+    return (rel if new and now and new > now else None), None
+
+
+def download_update(rel):
+    """Download + signature check + unpack. Returns the new setup_loopmedic.py, or raises with a readable message."""
+    if not rel.get("pkg") or not rel.get("sig"):
+        raise RuntimeError("This release has no signed Linux package - download it from GitHub instead.")
+    data = http_get(rel["pkg"])
+    sig = base64.b64decode(http_get(rel["sig"]).strip())
+    if not verify_signature(data, sig):
+        raise RuntimeError("The download FAILED the signature check, so it was not installed. Please tell the author.")
+    work = tempfile.mkdtemp(prefix="loopmedic-update-")
+    pkg = os.path.join(work, "LoopMedic-Linux.tar.gz")
+    with open(pkg, "wb") as f:
+        f.write(data)
+    with tarfile.open(pkg) as tar:
+        for m in tar.getmembers():   # nothing outside the folder, no links
+            if m.name.startswith("/") or ".." in m.name.split("/") or not (m.isfile() or m.isdir()):
+                raise RuntimeError("The package has an unexpected file in it - not installing.")
+        tar.extractall(work)
+    setup = os.path.join(work, "LoopMedic-Linux", "loopmedic", "setup_loopmedic.py")
+    if not os.path.exists(setup):
+        raise RuntimeError("The package has no setup script - download it from GitHub and run install.sh.")
+    return setup
+
+
+def plain_notes(md):
+    lines = [l.lstrip("#").strip() if l.startswith("#") else l for l in (md or "").replace("\r\n", "\n").split("\n")]
+    text = "\n".join(lines).replace("**", "").replace("`", "").strip()
+    return text or "(no notes for this release)"
+
+
+class Bridge(QObject):
+    """Hands results from download threads back to the Qt thread."""
+    done = Signal(object)
 
 
 # ------------------------------------------------------------------ theme
@@ -41,6 +147,7 @@ class T:
     Amber = QColor(240, 168, 48)
     Red = QColor(229, 72, 77)
     Blue = QColor(76, 154, 255)
+    Link = QColor(122, 176, 255)   # gentle link blue (version = update check)
     Grey = QColor(138, 143, 152)
     Off = QColor(90, 90, 98)
     Hot = QColor(58, 58, 68)
@@ -299,10 +406,15 @@ class Panel(QWidget, Clickable):
         g.setFont(fHead)
         g.setPen(T.Text)
         g.drawText(QPointF(pad, y + QFontMetricsF(fHead).ascent()), "LoopMedic")
-        if st.version:
-            g.setFont(fTiny)
-            g.setPen(T.Dim)
-            g.drawText(QPointF(pad + text_w(fHead, "LoopMedic") + 5, y + QFontMetricsF(fHead).ascent()), "v" + st.version)
+        # the version doubles as "check for updates": soft blue + hand cursor on hover, click to check
+        vtext = "v" + (st.version or TRAY_VERSION) + ("  checking..." if self.app.update_busy else "")
+        g.setFont(fTiny)
+        g.setPen(T.Link if self.hover == "#version" else T.Dim)
+        vx, vbase = pad + text_w(fHead, "LoopMedic") + 5, y + QFontMetricsF(fHead).ascent()
+        g.drawText(QPointF(vx, vbase), vtext)
+        fm = QFontMetricsF(fTiny)
+        self.buttons.append((QRectF(vx - 2, vbase - fm.ascent() - 3, text_w(fTiny, vtext) + 4, fm.height() + 6), "#version",
+                             self.app.check_updates))
         sc = T.for_state(st.state)
         label = T.label(st.state) + (" (DRY RUN)" if st.dry_run else "")
         lw = text_w(fTiny, label)
@@ -637,6 +749,9 @@ class TrayApp:
         self.started = datetime.now()
         self.seen_off_path = os.path.join(os.path.expanduser("~"), ".local", "state", "loopmedic", "seen-poweroff.txt")
         self.seen_off_checked = False
+        self.update_busy = False
+        self.bridge = Bridge()
+        self.bridge.done.connect(lambda f: f())   # run a callable on the Qt thread
 
         self.tray = QSystemTrayIcon()
         self.tray.setIcon(self.icon_for(self.current.state))
@@ -664,6 +779,95 @@ class TrayApp:
         self.timer.timeout.connect(self.tick)
         self.timer.start(1000)
         self.tick()
+        self.notify_if_updated()
+
+    # ---- updates (only when the version in the panel is clicked)
+    def later(self, f):
+        self.bridge.done.emit(f)
+
+    def check_updates(self):
+        if self.update_busy:
+            return
+        self.update_busy = True
+        current = self.current.version or TRAY_VERSION
+        if self.panel:
+            self.panel.update()
+
+        def work():
+            rel, err = check_latest(current)
+
+            def show():
+                self.update_busy = False
+                if self.panel:
+                    self.panel.update()
+                if err:
+                    self.tray.showMessage("LoopMedic - couldn't check for updates", err, QSystemTrayIcon.Warning, 8000)
+                elif not rel:
+                    self.tray.showMessage("LoopMedic is up to date", f"You're on the latest version ({current}).",
+                                          QSystemTrayIcon.Information, 6000)
+                else:
+                    self.offer_update(current, rel)
+            self.later(show)
+        threading.Thread(target=work, daemon=True).start()
+
+    def offer_update(self, current, rel):
+        box = QMessageBox()
+        box.setWindowTitle("LoopMedic update")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"LoopMedic {rel['version']} is available (you have {current}).\nUpdating keeps your settings.")
+        box.setInformativeText("What's new:\n\n" + plain_notes(rel["notes"]))
+        b_update = box.addButton("Update now", QMessageBox.AcceptRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        b_log = box.addButton("Full changelog", QMessageBox.HelpRole)
+        box.setDefaultButton(b_update)
+        box.exec()
+        if box.clickedButton() == b_log:
+            QDesktopServices.openUrl(QUrl(rel["page"]))
+        elif box.clickedButton() == b_update:
+            self.run_update(rel)
+
+    def run_update(self, rel):
+        self.tray.showMessage("LoopMedic", f"Downloading LoopMedic {rel['version']}...", QSystemTrayIcon.Information, 4000)
+        user, group = getpass.getuser(), grp.getgrgid(os.getgid()).gr_name
+
+        def work():
+            try:
+                setup = download_update(rel)
+            except (RuntimeError, OSError, urllib.error.URLError, ValueError, tarfile.TarError) as e:
+                msg = str(e)
+                self.later(lambda: self.tray.showMessage("LoopMedic update failed", msg, QSystemTrayIcon.Warning, 15000))
+                return
+            # pkexec asks for your password, then the new setup installs as root (settings kept)
+            r = subprocess.run(["pkexec", "/usr/bin/python3", setup, "--update-root", "--user", user, "--group", group],
+                               capture_output=True, text=True)
+
+            def after():
+                if r.returncode == 0:
+                    subprocess.Popen(["/usr/bin/python3", "/opt/loopmedic/loopmedic_tray.py"], start_new_session=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    QApplication.quit()   # the new tray takes over (it says "updated")
+                elif r.returncode in (126, 127):
+                    self.tray.showMessage("LoopMedic", "Update cancelled - no administrator permission.", QSystemTrayIcon.Warning, 8000)
+                else:
+                    tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or ["unknown error"]
+                    self.tray.showMessage("LoopMedic update failed", tail[0][:200], QSystemTrayIcon.Warning, 15000)
+            self.later(after)
+        threading.Thread(target=work, daemon=True).start()
+
+    def notify_if_updated(self):
+        f = os.path.join(os.path.expanduser("~"), ".local", "state", "loopmedic", "last-version.txt")
+        try:
+            before = open(f, encoding="utf-8").read().strip() if os.path.exists(f) else ""
+            if before == TRAY_VERSION:
+                return
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(TRAY_VERSION)
+            if before:
+                self.tray.showMessage("LoopMedic updated", f"Now running version {TRAY_VERSION} (was {before}). Your settings were kept.",
+                                      QSystemTrayIcon.Information, 8000)
+        except OSError:
+            pass
 
     # ---- loop
     def tick(self):

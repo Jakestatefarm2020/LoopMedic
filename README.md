@@ -31,6 +31,12 @@ Get the latest package from the [Releases](../../releases) page:
 - **Linux (systemd):** `LoopMedic-Linux.tar.gz` - unpack, run `bash install.sh` as your normal user (it asks for your password when it needs it).
   Read [linux/README.txt](linux/README.txt) first.
 
+**Updates:** click the version number next to "LoopMedic" at the top of the tray panel. It asks GitHub for the
+latest release, shows what's new, and on **Update now** downloads it, checks its signature and installs it,
+keeping your settings. Nothing checks in the background. Every release package is signed with the author's
+release key (RSA-3072, SHA-256); the trays carry the public half and refuse a package whose signature doesn't
+match, so a tampered download is never installed. `tools/pack-release.py` signs the packages.
+
 ## What's in this repo
 
 ```

@@ -80,6 +80,13 @@ THE TRAY ICON
                Pause 30 min / Run test / Open log, and a Live indicator
   Right-click  same actions + "Exit tray icon" (protection keeps running)
 
+  UPDATES: click the version number (e.g. "v2.2.0") at the top of the
+  panel; it turns blue when you point at it. LoopMedic asks GitHub for
+  the newest version, shows what's new, and on "Update now" downloads it,
+  checks it is genuinely signed by the author (a changed or fake download
+  is refused), asks for your password and installs it, keeping your
+  settings. Nothing checks for updates by itself.
+
   On Wayland, KWin decides where the panel opens (it may not sit right
   above the icon). The tray starts at login (~/.config/autostart) and is
   also in the app menu as "LoopMedic".

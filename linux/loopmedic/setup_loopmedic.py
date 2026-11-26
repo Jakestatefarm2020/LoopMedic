@@ -60,7 +60,8 @@ def yes_no(q):
 
 
 def sudo(args, input_text=None, check=True):
-    r = subprocess.run(["sudo"] + args, input=input_text, text=True)
+    # already root (the tray's update runs this through pkexec): run directly
+    r = subprocess.run(args if os.geteuid() == 0 else ["sudo"] + args, input=input_text, text=True)
     if check and r.returncode != 0:
         raise RuntimeError(f"'sudo {' '.join(args)}' failed (code {r.returncode})")
     return r.returncode
@@ -402,6 +403,35 @@ def install(cfg_path, with_tray):
     subprocess.run(["tail", "-n", "5", "/var/log/loopmedic/loopmedic.log"])
 
 
+def update_as_root(user, group):
+    """The tray's "update now": started through pkexec after the new version's signature checked out.
+    Keeps the settings in /etc/loopmedic/config.json (adds any new setting with its default), installs the
+    new files and restarts the service. The tray restarts itself afterwards."""
+    if os.geteuid() != 0:
+        raise RuntimeError("--update-root must run as root (the tray starts it through pkexec)")
+    if not os.path.exists(ETC_CFG):
+        raise RuntimeError("LoopMedic isn't installed here - run install.sh instead")
+    mine = json.load(open(ETC_CFG, encoding="utf-8"))
+    defaults = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+    for k, v in defaults.items():
+        if k not in mine:
+            mine[k] = v
+            say(f"new setting: {k} = {v}")
+    tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".json")
+    json.dump(mine, tmp, indent=2)
+    tmp.close()
+    sudo(["systemctl", "stop", "loopmedic.service"], check=False)
+    sudo(["install", "-m", "644", os.path.join(HERE, "loopmedic.py"), os.path.join(HERE, "loopmedic_tray.py"), LIMITS, OPT])
+    sudo(["install", "-m", "644", tmp.name, ETC_CFG])
+    os.remove(tmp.name)
+    sudo(["install", "-d", "-m", "755", "-o", user, "-g", group, CONTROL])
+    sudo_write(UNIT, unit_text())
+    sudo(["systemctl", "daemon-reload"])
+    sudo(["systemctl", "enable", "--now", "loopmedic.service"])
+    sudo(["systemctl", "restart", "loopmedic.service"])
+    say(f"LoopMedic updated to {pg.VERSION}.", "green")
+
+
 def uninstall():
     step("Removing LoopMedic")
     stop_tray()
@@ -425,7 +455,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--watch", action="store_true")
     ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--update-root", action="store_true", help=argparse.SUPPRESS)   # the tray's updater (via pkexec)
+    ap.add_argument("--user", help=argparse.SUPPRESS)
+    ap.add_argument("--group", help=argparse.SUPPRESS)
     a = ap.parse_args()
+
+    if a.update_root:
+        if not (a.user and a.group and re.fullmatch(r"[A-Za-z0-9._-]+", a.user) and re.fullmatch(r"[A-Za-z0-9._-]+", a.group)):
+            say("--update-root needs --user and --group", "red")
+            return 2
+        update_as_root(a.user, a.group)
+        return 0
 
     if a.watch:
         watch()
