@@ -1110,11 +1110,20 @@ namespace LoopMedic
                 Process w;
                 try { w = Process.Start(new ProcessStartInfo(Paths.Exe, string.Join(" ", args.Select(Watchdog.Quote))) { UseShellExecute = false, CreateNoWindow = true }); }
                 catch (Exception e) { Log.Write("Supervisor: couldn't start the watchdog (" + e.Message + ") - retrying in 10 s."); Thread.Sleep(10000); continue; }
-                double startedAt = Clock.Mono, lastChange = Clock.Mono;
+                double startedAt = Clock.Mono, lastChange = Clock.Mono, lastTick = Clock.Mono;
                 DateTime lastStamp = StatusStamp();
                 bool hung = false;
                 while (!w.WaitForExit(1000))
                 {
+                    // This loop ticks every second. A much longer gap means the PC was asleep (the clock
+                    // keeps counting through sleep): give the watchdog a fresh 30 s instead of calling it hung.
+                    double tick = Clock.Mono;
+                    if (tick - lastTick > 10)
+                    {
+                        Log.Write("Supervisor: PC was asleep for about " + (tick - lastTick).ToString("0", CultureInfo.InvariantCulture) + " s - giving the watchdog a fresh 30 s.");
+                        lastChange = tick;
+                    }
+                    lastTick = tick;
                     DateTime s = StatusStamp();
                     if (s != lastStamp) { lastStamp = s; lastChange = Clock.Mono; }
                     if (Clock.Mono - startedAt > 60 && Clock.Mono - lastChange > 30)

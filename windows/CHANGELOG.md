@@ -21,6 +21,8 @@ LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers 
   the PC powers off after 5 s.
 
 **Robustness**
+- Sleep no longer looks like a hang: the supervisor notices the PC was asleep and gives the watchdog a
+  fresh 30 s instead of restarting it (found in the real sleep/resume test).
 - The watchdog is now a compiled exe (`LoopMedic.exe`, .NET Framework 4, no install needed) in place of the
   PowerShell scripts. A supervisor process restarts a crashed worker within 2 s and a frozen one within
   30 s. The scheduled task (restart after 1 min plus a 5-minute "is it running?" trigger) is the second line.
