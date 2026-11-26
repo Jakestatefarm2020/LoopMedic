@@ -1,0 +1,18 @@
+{
+  "PumpSensorId": "",
+  "CpuTempSensorId": "",
+  "CpuName": "",
+  "PumpStoppedRpm": 150,
+  "PumpMinRpm": 500,
+  "PumpFailSeconds": 10,
+  "PumpFailSecondsCool": 60,
+  "CoolCpuTempC": 60,
+  "CpuMaxTempC": 85,
+  "CpuHotSeconds": 30,
+  "PollSeconds": 2,
+  "StartupGraceSeconds": 20,
+  "ShutdownDelaySeconds": 30,
+  "HotShutdownDelaySeconds": 5,
+  "RearmSeconds": 120,
+  "HeartbeatMinutes": 60
+}

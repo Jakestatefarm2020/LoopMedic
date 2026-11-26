@@ -1,0 +1,20 @@
+{
+  "_about": "CPU temperature limits used by LoopMedic setup and by the watchdog when the CPU is new or the limit was left at 0. tjmax = the maker's max operating temperature (AMD 'Max. Operating Temperature (Tjmax)', Intel 'Max Operating Temperature / TJunction'). The suggested trip is tjmax - 5 C, except for chips that are designed to sit AT their limit under heavy load (runsAtLimit): there the trip is the limit itself held for hotSeconds. First match wins. Unknown CPUs fall back to 95 C.",
+  "fallbackTripC": 95,
+  "chips": [
+    { "family": "AMD Ryzen 9000 X3D",          "match": "Ryzen \\d+ 9\\d{3}X3D",             "tjmax": 95,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 9000",              "match": "Ryzen \\d+ 9\\d{3}",                "tjmax": 95,  "runsAtLimit": true,  "hotSeconds": 60 },
+    { "family": "AMD Ryzen 8000G",             "match": "Ryzen \\d+ 8\\d{3}G",               "tjmax": 95,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 7000 X3D",          "match": "Ryzen \\d+ 7\\d{3}X3D",             "tjmax": 89,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 7000",              "match": "Ryzen \\d+ 7\\d{3}",                "tjmax": 95,  "runsAtLimit": true,  "hotSeconds": 60 },
+    { "family": "AMD Ryzen 5000 X3D",          "match": "Ryzen \\d+ 5\\d{3}X3D",             "tjmax": 90,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 5000G APU",         "match": "Ryzen \\d+ 5\\d{3}G",               "tjmax": 95,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 5 5600X",           "match": "Ryzen 5 5600X\\b",                  "tjmax": 95,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 5000",              "match": "Ryzen \\d+ 5\\d{3}",                "tjmax": 90,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 3000",              "match": "Ryzen \\d+ 3\\d{3}",                "tjmax": 95,  "runsAtLimit": false },
+    { "family": "AMD Ryzen 1000/2000",         "match": "Ryzen \\d+ [12]\\d{3}",             "tjmax": 95,  "runsAtLimit": false },
+    { "family": "Intel Core Ultra 200S",       "match": "Core\\(?T?M?\\)? Ultra \\d+ 2\\d{2}", "tjmax": 105, "runsAtLimit": true,  "hotSeconds": 60 },
+    { "family": "Intel Core 12th-14th gen",    "match": "(i\\d-1[234]\\d{3}|1[234]th Gen Intel)", "tjmax": 100, "runsAtLimit": true,  "hotSeconds": 60 },
+    { "family": "Intel Core 8th-11th gen",     "match": "(i\\d-(8|9|10|11)\\d{3}|(8|9|10|11)th Gen Intel)", "tjmax": 100, "runsAtLimit": false }
+  ]
+}

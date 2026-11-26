@@ -1,0 +1,19 @@
+# your own settings and local data from runs - never commit
+windows/config.json
+loopmedic.log
+loopmedic.log.old
+pumpguard.log
+pumpguard.log.old
+status.json
+control/
+sensors.txt
+watch-pump.txt
+last-*.json
+# build output and third-party binaries (releases include them)
+*.exe
+bin/
+windows/lhm/
+__pycache__/
+*.pyc
+# words the release privacy scan must catch (personal - stays local)
+tools/private-patterns.txt
