@@ -4,8 +4,11 @@ r"""Take docs/panel.png: the tray panel running on MADE-UP sensor values (no rea
 
 Runs windows\bin\LoopMedic.exe as a watchdog on fake sensors in a temp folder, opens a second tray panel for
 that folder, feeds it ~70 s of gently varying readings so the graphs fill in, then captures the panel window.
+Needs Pillow: the capture's 1-px Windows border and rounded corners (desktop shows through them) are
+replaced with a clean, even border and transparent corners.
 """
 import ctypes, ctypes.wintypes as wt, json, math, os, random, shutil, subprocess, sys, tempfile, time
+from PIL import Image, ImageDraw
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "windows", "bin")
@@ -34,6 +37,23 @@ def push(t):
     tmp = fake + ".tmp"
     json.dump(doc, open(tmp, "w"))
     os.replace(tmp, fake)
+
+
+def clean_edges(path, radius=8, bg=(28, 28, 33), border=(58, 58, 64), ss=4):
+    """Replace the captured window border and corner bleed with a uniform border and transparent corners."""
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+
+    def rounded(inset, r):
+        m = Image.new("L", (w * ss, h * ss), 0)
+        ImageDraw.Draw(m).rounded_rectangle((inset * ss, inset * ss, (w - inset) * ss - 1, (h - inset) * ss - 1),
+                                            r * ss, fill=255)
+        return m.resize((w, h), Image.LANCZOS)
+
+    inner = Image.composite(im, Image.new("RGB", (w, h), bg), rounded(1, radius - 1))
+    out = Image.composite(inner, Image.new("RGB", (w, h), border), rounded(1, radius - 1)).convert("RGBA")
+    out.putalpha(rounded(0, radius))
+    out.save(path, optimize=True)
 
 
 push(0)
@@ -72,6 +92,7 @@ try:
           f"$b = New-Object System.Drawing.Bitmap {r - l},{b - t}; $g = [System.Drawing.Graphics]::FromImage($b); "
           f"$g.CopyFromScreen({l},{t},0,0,$b.Size); $b.Save('{OUT}', [System.Drawing.Imaging.ImageFormat]::Png)")
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
+    clean_edges(OUT)
     print("saved", OUT, f"({r - l}x{b - t})")
 finally:
     tray.kill()
