@@ -85,5 +85,11 @@ Event Log off. It covers 24 scenarios: trips, the jump rule, slow-pump warnings,
 faster, pause limits, a sensor vanishing, CPU changes, broken config, missing privilege, self-tests, last
 power-off, temperature-only mode, and supervisor restarts after a crash or a hang.
 
-Still to run on real hardware (done by hand, with the owner's OK): sleep/resume, and a real forced power-off
-for each trip type.
+Tested on the author's own PC (November 2026, real hardware, real forced power-offs; scripts in `tools/real-tests/`):
+
+- **Sleep / resume:** protection carries on after waking. This test found a bug: the supervisor took sleep for a hang. Fixed in 2.2.0.
+- **Pump stopped:** 30 s alarm, forced power-off, and the "why your PC turned off" notice after boot.
+- **CPU too hot:** forced power-off, including the hotter = faster cut about 8 s in.
+- **Pump stopped while the CPU is already hot:** 5 s power-off.
+
+The Linux version has passed its automated tests but hasn't yet run on a real Linux PC.
