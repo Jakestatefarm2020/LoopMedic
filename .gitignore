@@ -17,3 +17,5 @@ __pycache__/
 *.pyc
 # words the release privacy scan must catch (personal - stays local)
 tools/private-patterns.txt
+# notes the real-test scripts write
+tools/real-tests/realtest-notes.txt
