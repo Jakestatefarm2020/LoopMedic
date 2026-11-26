@@ -35,7 +35,8 @@ Get the latest package from the [Releases](../../releases) page:
 windows/   C# watchdog (src/), tray app (tray/), installer + setup scripts, tests
            built on your PC by build.ps1 with the .NET Framework compiler that ships with Windows
 linux/     Python (standard library) watchdog as a systemd service, PySide6 tray app, setup, tests
-tools/     pack-release.py - builds both release packages
+tools/     pack-release.py - builds both release packages; panel-screenshot.py - docs/panel.png on made-up
+           sensor values; real-tests/ - real power-off and pop-up tests (admin)
 ```
 
 Both versions share the same version numbers, rules and CPU limit table (`cpu-limits.json`).
