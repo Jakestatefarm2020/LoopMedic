@@ -39,6 +39,10 @@ if ((Resolve-Path $LhmDir).Path -ne (Resolve-Path -LiteralPath $binLhm -ErrorAct
 
 $out2 = Join-Path $OutDir 'LoopMedicTray.exe'
 $trayArgs = @('/target:winexe', "/out:$out2", '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+# Windows toast notifications (WinRT): the metadata ships with Windows 10/11.
+$wm = Join-Path $env:WINDIR 'System32\WinMetadata'
+$trayArgs += @("/r:$(Join-Path $wm 'Windows.UI.winmd')", "/r:$(Join-Path $wm 'Windows.Data.winmd')", "/r:$(Join-Path $wm 'Windows.Foundation.winmd')",
+               "/r:$(Join-Path $fw 'System.Runtime.dll')", "/r:$(Join-Path $fw 'System.Runtime.WindowsRuntime.dll')")
 $ico = Join-Path $here 'tray\LoopMedic.ico'
 if (Test-Path $ico) { $trayArgs += "/win32icon:$ico" }
 & $csc @common @trayArgs (Join-Path $here 'tray\LoopMedicTray.cs')

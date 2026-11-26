@@ -324,17 +324,29 @@ namespace LoopMedicTray
         readonly DateTime trayStarted = DateTime.Now;
         // "Why did my PC turn off?" - once per power-off, within a day of it, remembered per user.
         DateTime powerOffNoticeAt = DateTime.MinValue;
+        readonly HashSet<string> shownPowerOffs = new HashSet<string>();
         void NotifyLastPowerOff()
         {
             if (!Current.LastPowerOffAt.HasValue || (DateTime.Now - Current.LastPowerOffAt.Value).TotalHours > 24) return;
             string key = Current.LastPowerOffAt.Value.ToString("o");
+            if (shownPowerOffs.Contains(key)) return;       // this tray already showed it (even if the file below can't be written)
+            shownPowerOffs.Add(key);
+            // Remember every power-off already shown, not just the last one: two trays (e.g. a test tray) sharing
+            // this file must not keep "un-seeing" each other's and re-showing the notice every second.
             string seenFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LoopMedic", "seen-poweroff.txt");
-            try { if (File.Exists(seenFile) && File.ReadAllText(seenFile).Trim() == key) return; } catch { }
-            try { Directory.CreateDirectory(Path.GetDirectoryName(seenFile)); File.WriteAllText(seenFile, key); } catch { }
+            try
+            {
+                var seen = File.Exists(seenFile) ? File.ReadAllLines(seenFile).Select(l => l.Trim()).Where(l => l.Length > 0).ToList() : new List<string>();
+                if (seen.Contains(key)) return;
+                seen.Add(key);
+                Directory.CreateDirectory(Path.GetDirectoryName(seenFile));
+                File.WriteAllLines(seenFile, seen.Skip(Math.Max(0, seen.Count - 20)).ToArray());
+            }
+            catch { }
             powerOffNoticeAt = DateTime.Now;
-            ni.ShowBalloonTip(15000, "LoopMedic powered off this PC",
+            Notice("LoopMedic powered off this PC",
                 Current.LastPowerOffAt.Value.ToString("t") + ": " + (Current.LastPowerOffReason ?? "") + ". Check your cooler before heavy use. Details: Event Viewer > Application > LoopMedic.",
-                ToolTipIcon.Warning);
+                true, ToolTipIcon.Warning);
         }
 
         void Notify()
@@ -353,13 +365,13 @@ namespace LoopMedicTray
             if (lastProblem == null) { lastProblem = problem; if (problem != "") Warn(problem); return; }
             if (problem == lastProblem) return;
             if (problem != "") Warn(problem);
-            else ni.ShowBalloonTip(4000, "LoopMedic", "Protection is back to normal.", ToolTipIcon.Info);
+            else Notice("LoopMedic", "Protection is back to normal.", false, ToolTipIcon.Info);
             lastProblem = problem;
         }
         void Warn(string text)
         {
             if (text.Length > 250) text = text.Substring(0, 247) + "...";
-            ni.ShowBalloonTip(10000, "LoopMedic - protection reduced", text, ToolTipIcon.Warning);
+            Notice("LoopMedic - protection reduced", text, false, ToolTipIcon.Warning);
         }
 
         void UpdateIcon()
@@ -386,8 +398,18 @@ namespace LoopMedicTray
 
         static Icon MakeIcon(string state)
         {
-            int sz = Math.Max(SystemInformation.SmallIconSize.Width, 16);
-            using (var bmp = new Bitmap(sz, sz))
+            using (var bmp = Shield(Math.Max(SystemInformation.SmallIconSize.Width, 16), state))
+            {
+                IntPtr h = bmp.GetHicon();
+                var ic = (Icon)Icon.FromHandle(h).Clone();
+                DestroyIcon(h);
+                return ic;
+            }
+        }
+
+        public static Bitmap Shield(int sz, string state)
+        {
+            var bmp = new Bitmap(sz, sz);
             using (var g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -414,11 +436,15 @@ namespace LoopMedicTray
                     using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                         g.DrawString(glyph, f, Brushes.White, new RectangleF(0, -sz * 0.02f, w, w), sf);
                 }
-                IntPtr h = bmp.GetHicon();
-                var ic = (Icon)Icon.FromHandle(h).Clone();
-                DestroyIcon(h);
-                return ic;
             }
+            return bmp;
+        }
+
+        // A notification: a Windows toast (stays in the notification center; important ones stay on screen until
+        // dismissed), or the old tray balloon if toasts aren't available.
+        void Notice(string title, string text, bool important, ToolTipIcon icon)
+        {
+            if (!Toast.Show(title, text, important)) ni.ShowBalloonTip(important ? 15000 : 10000, title, text, icon);
         }
 
         // ---- actions
@@ -426,6 +452,7 @@ namespace LoopMedicTray
         {
             try
             {
+                if (!Directory.Exists(controlDir)) { try { Directory.CreateDirectory(controlDir); } catch { } }   // the watchdog also recreates it
                 File.WriteAllText(Path.Combine(controlDir, file), "{\"" + field + "\":\"" + value.ToString("o", CultureInfo.InvariantCulture) + "\"}");
                 return true;
             }
@@ -759,6 +786,54 @@ namespace LoopMedicTray
     }
 
     // ------------------------------------------------------------------ trip pop-up
+    // Windows toast notifications. A desktop app needs an app ID registered under HKCU for them to show with a
+    // name + icon and stay in the notification center. Any failure (older Windows, policy) returns false and the
+    // caller falls back to a tray balloon.
+    static class Toast
+    {
+        const string AppId = "LoopMedic.Tray";
+        static bool registered, broken;
+
+        public static bool Show(string title, string text, bool stayUntilDismissed)
+        {
+            if (broken) return false;
+            try { Register(); ShowCore(title, text, stayUntilDismissed); return true; }
+            catch { broken = true; return false; }
+        }
+
+        static void Register()
+        {
+            if (registered) return;
+            registered = true;
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LoopMedic");
+                Directory.CreateDirectory(dir);
+                string png = Path.Combine(dir, "loopmedic-icon.png");
+                using (var bmp = TrayContext.Shield(64, "ARMED")) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Classes\AppUserModelId\" + AppId))
+                {
+                    k.SetValue("DisplayName", "LoopMedic");
+                    k.SetValue("IconUri", png);
+                }
+            }
+            catch { }
+        }
+
+        // Kept separate so a missing WinRT (very old Windows) fails here, inside Show's try, not at startup.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void ShowCore(string title, string text, bool stay)
+        {
+            string x = "<toast" + (stay ? " scenario='reminder'" : "") + "><visual><binding template='ToastGeneric'>" +
+                       "<text>" + System.Security.SecurityElement.Escape(title) + "</text>" +
+                       "<text>" + System.Security.SecurityElement.Escape(text) + "</text></binding></visual>" +
+                       (stay ? "<actions><action activationType='system' arguments='dismiss' content=''/></actions>" : "") + "</toast>";
+            var xml = new Windows.Data.Xml.Dom.XmlDocument();
+            xml.LoadXml(x);
+            Windows.UI.Notifications.ToastNotificationManager.CreateToastNotifier(AppId).Show(new Windows.UI.Notifications.ToastNotification(xml));
+        }
+    }
+
     class TripForm : Form
     {
         readonly TrayContext app;
@@ -782,7 +857,6 @@ namespace LoopMedicTray
             deadline = st.TripDeadline ?? DateTime.Now.AddSeconds(15);
             total = Math.Max(1, (deadline - DateTime.Now).TotalSeconds);
             FormBorderStyle = FormBorderStyle.None;
-            StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
             ShowInTaskbar = true;
             Text = "LoopMedic - " + title;
@@ -790,6 +864,11 @@ namespace LoopMedicTray
             DoubleBuffered = true;
             Width = (int)(500 * S);
             Height = (int)(242 * S);
+            // Near the top of the main screen, not the middle: Windows' own "You're about to be signed out" box
+            // (from the backup shutdown) always sits in the middle and would cover this one.
+            StartPosition = FormStartPosition.Manual;
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Top + Math.Max((int)(24 * S), wa.Height / 12));
             t.Interval = 200;
             t.Tick += delegate { Invalidate(); if (DateTime.Now > deadline.AddSeconds(3) && isTest) Close(); };
             t.Start();

@@ -21,6 +21,9 @@ LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers 
   the PC powers off after 5 s.
 
 **Robustness**
+- The watchdog recreates a missing `control\` folder (Users: modify) at start, so the tray can always check in.
+- Before the power cut, Windows is asked to write the system drive out (at most 1.5 s), to give
+  Event Viewer's last entries a chance to survive.
 - Sleep no longer looks like a hang: the supervisor notices the PC was asleep and gives the watchdog a
   fresh 30 s instead of restarting it (found in the real sleep/resume test).
 - The watchdog is now a compiled exe (`LoopMedic.exe`, .NET Framework 4, no install needed) in place of the
@@ -42,6 +45,12 @@ LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers 
 - The safe test runs the exe in a temporary folder.
 
 **Tray**
+- Notifications are real Windows notifications now: they stay in the notification center, and the
+  "LoopMedic powered off this PC" one stays on screen until dismissed (falls back to a tray balloon).
+- The trip alarm opens near the top of the screen, so Windows' own "You're about to be signed out" box
+  (the backup shutdown, always in the middle) doesn't cover it.
+- The power-off notice and the amber "last power-off" line clear after 24 hours (was 7 days).
+- Each power-off is announced once, even with a second (test) tray running.
 - The pump graph keeps headroom of 10% of the speed above and below the line, so the sensor's normal
   one-reading wiggles (a few %) show as small ticks instead of filling the graph. Every reading is still shown.
 

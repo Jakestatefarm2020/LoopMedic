@@ -847,7 +847,7 @@ def main(argv=None):
             if trip:
                 state = "TEST" if trip["kind"] == "test" else "TRIPPED"
             lo = None
-            if last_off and parse_when(last_off.get("at")) and (now - parse_when(last_off.get("at"))).days < 7:
+            if last_off and parse_when(last_off.get("at")) and (now - parse_when(last_off.get("at"))).total_seconds() < 24 * 3600:   # tray shows it for a day
                 lo = {"at": last_off.get("at"), "reason": last_off.get("reason")}
             write_status(status_path, {
                 "at": now_iso(),

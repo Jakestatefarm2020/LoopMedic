@@ -266,6 +266,26 @@ namespace LoopMedic
             catch { return null; }
         }
         public static DateTime? Read(string name, string field) { DateTime w; return Read(name, field, out w); }
+        // control\ is where the tray app checks in and drops requests. If it's missing (deleted, or a hand-made
+        // install folder), recreate it with the installer's permission: Users may modify. Without it the tray
+        // can't check in, and every trip would also show the plain msg.exe fallback box.
+        public static void EnsureFolder()
+        {
+            try
+            {
+                if (Directory.Exists(Paths.Control)) return;
+                Directory.CreateDirectory(Paths.Control);
+                var sec = Directory.GetAccessControl(Paths.Control);
+                sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                    System.Security.AccessControl.FileSystemRights.Modify,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+                Directory.SetAccessControl(Paths.Control, sec);
+                Log.Write("control folder was missing - recreated it (Users: modify).");
+            }
+            catch (Exception e) { Log.Write("control folder is missing and couldn't be recreated: " + e.Message); }
+        }
         public static void Write(string name, string field, DateTime value)
         {
             try
@@ -283,6 +303,30 @@ namespace LoopMedic
         [DllImport("ntdll.dll")] public static extern int RtlAdjustPrivilege(int privilege, bool enable, bool currentThread, out bool wasEnabled);
         [DllImport("ntdll.dll")] public static extern int NtShutdownSystem(int action);   // 2 = ShutdownPowerOff
         public const int SeShutdownPrivilege = 19;
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr h);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+        // Ask Windows to write everything it's holding for the system drive (Event Viewer keeps recent entries
+        // in memory). Gives up after maxMs so the power-off is never held up for long. True = finished in time.
+        public static bool FlushSystemDrive(int maxMs)
+        {
+            var done = new ManualResetEvent(false);
+            var th = new Thread(delegate ()
+            {
+                try
+                {
+                    string vol = @"\\.\" + Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
+                    IntPtr h = CreateFile(vol, 0x40000000 /* GENERIC_WRITE */, 3 /* share read+write */, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+                    if (h != new IntPtr(-1)) { FlushFileBuffers(h); CloseHandle(h); }
+                }
+                catch { }
+                done.Set();
+            }) { IsBackground = true };
+            th.Start();
+            return done.WaitOne(maxMs);
+        }
 
         // Can this process get the power-off right? Turns it on, then puts it back as it was.
         public static int CheckShutdownPrivilege()
@@ -507,6 +551,7 @@ namespace LoopMedic
             var mutex = new Mutex(false, "Global\\LoopMedicWorker-" + (Paths.Root.ToLowerInvariant().GetHashCode() & 0x7fffffff), out created);
             try { if (!mutex.WaitOne(TimeSpan.FromSeconds(10))) { Log.Write("Another watchdog is already running here - exiting."); return 0; } }
             catch (AbandonedMutexException) { }
+            Control.EnsureFolder();
 
             // ---- config (a broken config must show up in the tray, not just crash) ----
             cfg = Json.ReadFile(Paths.Config, 256 * 1024);
@@ -922,7 +967,7 @@ namespace LoopMedic
                 if (lastOff != null)
                 {
                     DateTime? lat = Json.Date(lastOff, "at");
-                    if (lat.HasValue && (wall - lat.Value).TotalDays < 7)
+                    if (lat.HasValue && (wall - lat.Value).TotalHours < 24)   // tray shows it for a day
                         lastOffStatus = new Dictionary<string, object> { { "at", Json.Iso(lat.Value) }, { "reason", Json.Str(lastOff, "reason") } };
                 }
                 WriteStatus(new Dictionary<string, object> {
@@ -1083,7 +1128,11 @@ namespace LoopMedic
             catch { }
             Events.Error(Events.PoweringOff, "LoopMedic is powering off this PC now to protect the hardware: " + o.Reason + ".");
             Log.Write("POWERING OFF NOW (forced, skips Windows Update): " + o.Reason, p);
-            Thread.Sleep(1000);   // give the event log and the log file a moment to reach the disk
+            // Give the event log and the log file a moment to reach the disk: ask Windows to write out the system
+            // drive (Event Viewer otherwise loses the last ~30-60 s of entries in a power cut), at most 1.5 s.
+            var flushTimer = Stopwatch.StartNew();
+            Native.FlushSystemDrive(1500);
+            if (flushTimer.ElapsedMilliseconds < 300) Thread.Sleep(300);
             int r = Native.NtShutdownSystem(2);
             // Only reached if the forced power-off failed.
             Log.Write("NtShutdownSystem failed (0x" + r.ToString("X8") + ", privilege 0x" + priv.ToString("X8") + ") - falling back to shutdown /p /f.", p);
