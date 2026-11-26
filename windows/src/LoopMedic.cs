@@ -684,7 +684,8 @@ namespace LoopMedic
                 {
                     if (stallHour != wall.Hour) { stallHour = wall.Hour; stallCount = 0; }
                     stallCount++;
-                    string why = gap >= 300 || wallGap >= 300 ? "PC probably asleep" : "the sensor read itself took " + (now - readStart).ToString("0.0", CultureInfo.InvariantCulture) + " s";
+                    // A quick sensor read inside a long gap means the whole PC paused (sleep), not the read.
+                    string why = gap >= 300 || wallGap >= 300 || now - readStart < gap / 2 ? "PC probably asleep" :"the sensor read itself took " + (now - readStart).ToString("0.0", CultureInfo.InvariantCulture) + " s";
                     if (stallCount <= 20) Log.Write("Stalled: no check for " + gap.ToString("0", CultureInfo.InvariantCulture) + " s (" + why + ").");
                     else if (stallCount == 21) Log.Write("Stalled: more than 20 this hour - not logging the rest until the next hour.");
                 }
