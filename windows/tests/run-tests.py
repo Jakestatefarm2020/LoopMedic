@@ -354,8 +354,19 @@ def health_history(rig, days, rpm_at, per_day=24, band="light"):
         f.write("\n".join(lines) + "\n")
 
 
+def t_health_off_by_default():
+    r = Rig("health_off")      # no EarlyWarning in config: the experimental feature stays off
+    health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)
+    r.start(duration=6)
+    time.sleep(4); st = r.status()
+    r.wait(); p = []
+    expect("EARLY WARNING" not in r.log(), "no early warning unless switched on", p)
+    expect(st.get("earlyWarning") is False, f"status says it's off ({st.get('earlyWarning')})", p)
+    return p
+
+
 def t_health_dying_pump():
-    r = Rig("health_dying")
+    r = Rig("health_dying", EarlyWarning=True)
     health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)    # the last 3 days ~15% slower
     r.start(duration=8)
     time.sleep(6); st = r.status()
@@ -369,7 +380,7 @@ def t_health_dying_pump():
 
 
 def t_health_speed_setting_raised():
-    r = Rig("health_raised")
+    r = Rig("health_raised", EarlyWarning=True)
     health_history(r, 30, lambda ago: 2800 if ago <= 3 else 2400)    # pump curve changed upwards
     r.start(duration=6)
     r.wait(); log = r.log(); p = []
@@ -381,29 +392,31 @@ def t_health_speed_setting_raised():
 
 
 def t_health_slow_decline():
-    # 14 flat days set the normal, then the pump loses ~20 rpm a day for 23 days: the fixed normal catches it
-    r = Rig("health_decline")
+    # 5 flat days set the normal, then the pump loses ~20 rpm a day for 23 days: the fixed normal catches it
+    r = Rig("health_decline", EarlyWarning=True)
     health_history(r, 37, lambda ago: 2400 if ago >= 23 else 2400 - (23 - ago) * 20)
     r.start(duration=6)
     r.wait(); log = r.log(); p = []
-    expect("Learned the normal pump speed: 2,400 rpm" in log, "normal learned from the first 14 days", p)
+    expect("Learned the normal pump speed: 2,400 rpm" in log, "normal learned from the first 5 days", p)
     expect("EARLY WARNING" in log, "a slow decline is caught against the fixed normal", p)
     return p
 
 
 def t_health_steady_and_learning():
-    a = Rig("health_steady"); health_history(a, 30, lambda ago: 2400 + (ago % 1) * 20)
-    b = Rig("health_learning"); health_history(b, 5, lambda ago: 2000 if ago <= 2 else 2400)   # only 5 days: still learning
-    a.start(duration=6); b.start(duration=6)
-    a.wait(); b.wait(); p = []
+    a = Rig("health_steady", EarlyWarning=True); health_history(a, 30, lambda ago: 2400 + (ago % 1) * 20)
+    b = Rig("health_learning", EarlyWarning=True); health_history(b, 4, lambda ago: 2000 if ago <= 2 else 2400)   # only 4 days: still learning
+    c = Rig("health_too_soon", EarlyWarning=True); health_history(c, 6, lambda ago: 2000 if ago <= 1 else 2400)   # learned, but < 3 days since
+    a.start(duration=6); b.start(duration=6); c.start(duration=6)
+    a.wait(); b.wait(); c.wait(); p = []
+    expect("Learned the normal" in c.log() and "EARLY WARNING" not in c.log(), "no verdict until a full 3 days after learning", p)
     expect("EARLY WARNING" not in a.log(), "a steady pump never warns", p)
-    expect("EARLY WARNING" not in b.log(), "no warning before 14 days of history", p)
+    expect("EARLY WARNING" not in b.log(), "no warning before 5 days of history", p)
     return p
 
 
 def t_health_samples_and_relearn():
     # short windows: a sample every 6 s from 3+ readings, no warm-up
-    r = Rig("health_sampling", HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=26)
+    r = Rig("health_sampling", EarlyWarning=True, HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=26)
     time.sleep(16)
     r.control("health-reset.json", "at", datetime.now())
     r.wait(); p = []

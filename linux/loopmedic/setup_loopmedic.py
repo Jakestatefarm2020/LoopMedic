@@ -649,8 +649,18 @@ def main():
         say(f"No {what} sensor and no CPU temperature sensor: there is nothing to watch. Setup stopped.", "red")
         return 1
 
+    # optional: early warning (experimental)
+    early = False
+    if pump:
+        say()
+        say(f"EXPERIMENTAL: early warning for a {what} slowing down.", "yellow")
+        say(f"LoopMedic learns your {what}'s normal speed over about 5 days, then warns you (a notification, never a")
+        say(f"power-off) if it runs 12% slower for 3 days. It has only been briefly tested and may give false warnings.")
+        early = yes_no("Turn on the experimental early warning?")
+
     cfg_path = os.path.join(ROOT, "config.json")
     cfg = json.load(open(cfg_path, encoding="utf-8"))
+    cfg["EarlyWarning"] = early
     cfg["PumpSensorId"] = pump.id if pump else ""
     cfg["CpuTempSensorId"] = temp.id if temp else ""
     cfg["CpuName"] = cpu           # remembered so LoopMedic notices a CPU swap

@@ -14,8 +14,9 @@ LoopMedic 2.3 for Linux                               by Jacob Stiltner
   limit, the countdown is 5 s instead of 30 ("hotter = faster").
 
   Air cooler? Setup asks; the CPU fan then takes the pump's place.
-  Early warning: it learns your pump's normal speed (about 2 weeks) and
-  warns - never powers off - if it slowly runs slower (EARLY WARNING).
+  Experimental early warning (off unless you turn it on in setup): it
+  learns your pump's normal speed (about 5 days) and warns - never powers
+  off - if it slowly runs slower (EARLY WARNING).
   Optional email alerts through your own mail server (EMAIL ALERTS).
 
   PLEASE READ: NO WARRANTY
@@ -47,7 +48,8 @@ INSTALL (about 3 minutes)
                              use this Nuvoton chip; it is only READ, no fan
                              speed is ever changed), and keeps that setting
      3/6 Your CPU cooler     AIO / water loop or air cooler, then a
-                             numbered fan list; the likely pump is marked
+                             numbered fan list (the likely pump is marked),
+                             then: try the EXPERIMENTAL early warning? y/n
                              and Enter picks it; press w to watch them live
                              for 20 s while you change the pump speed.
                              No header at pump speed? Your AIO may report
@@ -93,7 +95,7 @@ THE TRAY ICON
                Relearn normal pump speed, Send a test email (once email
                alerts are on) and Exit tray icon (protection keeps running)
 
-  UPDATES: click the version number (e.g. "v2.2.0") at the top of the
+  UPDATES: click the version number (e.g. "v2.3.0") at the top of the
   panel; it turns blue when you point at it. LoopMedic asks GitHub for
   the newest version, shows what's new, and on "Update now" downloads it,
   checks it is genuinely signed by the author (a changed or fake download
@@ -135,6 +137,8 @@ FROM THE TERMINAL
                                single bad readings, counted each hour
     Pump jump: ... (confirmed by the next reading)
                                the pump really did speed up
+    EARLY WARNING: ...         only with the experimental early warning on
+    Mail: ...                  email alerts: settings loaded, sent, or why not
     Stalled: no check for N s  the service fell behind (checks normally land
                                every 2 s). Rare = fine; lots = worth a look.
 
@@ -255,16 +259,20 @@ BEFORE YOU UPDATE OR TINKER
 
 
 --------------------------------------------------------------------------
-EARLY WARNING: A PUMP SLOWING DOWN
+EARLY WARNING: A PUMP SLOWING DOWN  (EXPERIMENTAL)
 --------------------------------------------------------------------------
+
+  Off unless you said y to it in setup (step 3). Only briefly tested:
+  treat a warning as "worth a look", not proof of a bad pump. A pump that
+  follows the liquid temperature can also run slower in a colder room.
 
   Pumps usually wear out slowly before they stop. Three times an hour
   LoopMedic saves a "health sample": the middle value of the pump
   readings, kept apart by how busy the CPU was (light / medium / heavy).
   Only normal running counts (not the first 5 min after start or wake,
   not while paused or alarming).
-    * The first 2 weeks set your pump's NORMAL speed.
-    * Then, if the last 3 days run 12% or more slower, you get ONE
+    * The first 5 days set your pump's NORMAL speed.
+    * Then (from day 8), if the last 3 days run 12% or more slower, ONE
       desktop notification (it stays in the notification history), an
       "EARLY WARNING" log line, and an email if email alerts are on.
       Never a power-off, never in the panel.
@@ -309,7 +317,7 @@ CHANGE SETTINGS / REMOVE
       CpuHotSeconds
       ShutdownDelaySeconds (30), HotShutdownDelaySeconds (5)
       CoolerType ("aio"; "air" = watch the CPU fan)
-      HealthWarnPercent (12), HealthLearnDays (14)   early warning
+      EarlyWarning (false), HealthWarnPercent (12), HealthLearnDays (5)
   * Remove completely: bash uninstall.sh
 
   !! MOVING THE PUMP CABLE TO ANOTHER HEADER?

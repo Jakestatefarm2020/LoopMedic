@@ -404,8 +404,19 @@ def write_mail(rig, port, enabled=True):
     w(os.path.join(rig.root, "mail.json"), json.dumps(mail_json(port, enabled)))
 
 
+def t_health_off_by_default():
+    r = Rig("health_off")      # no EarlyWarning in config: the experimental feature stays off
+    health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)
+    r.start(duration=6)
+    time.sleep(4); st = r.status()
+    r.wait(); p = []
+    expect("EARLY WARNING" not in r.log(), "no early warning unless switched on", p)
+    expect(st.get("earlyWarning") is False, f"status says it's off ({st.get('earlyWarning')})", p)
+    return p
+
+
 def t_health_dying_pump():
-    r = Rig("health_dying")
+    r = Rig("health_dying", EarlyWarning=True)
     health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)
     r.start(duration=6)
     time.sleep(4); st = r.status()
@@ -417,24 +428,26 @@ def t_health_dying_pump():
 
 
 def t_health_slow_decline_and_raise():
-    a = Rig("health_decline"); health_history(a, 37, lambda ago: 2400 if ago >= 23 else 2400 - (23 - ago) * 20)
-    b = Rig("health_raised"); health_history(b, 30, lambda ago: 2800 if ago <= 3 else 2400)
-    c = Rig("health_steady"); health_history(c, 30, lambda ago: 2400 + (ago % 1) * 20)
-    d = Rig("health_learning"); health_history(d, 5, lambda ago: 2000 if ago <= 2 else 2400)
-    for x in (a, b, c, d):
+    a = Rig("health_decline", EarlyWarning=True); health_history(a, 37, lambda ago: 2400 if ago >= 23 else 2400 - (23 - ago) * 20)
+    b = Rig("health_raised", EarlyWarning=True); health_history(b, 30, lambda ago: 2800 if ago <= 3 else 2400)
+    c = Rig("health_steady", EarlyWarning=True); health_history(c, 30, lambda ago: 2400 + (ago % 1) * 20)
+    d = Rig("health_learning", EarlyWarning=True); health_history(d, 4, lambda ago: 2000 if ago <= 2 else 2400)
+    e = Rig("health_too_soon", EarlyWarning=True); health_history(e, 6, lambda ago: 2000 if ago <= 1 else 2400)
+    for x in (a, b, c, d, e):
         x.start(duration=5)
-    for x in (a, b, c, d):
+    for x in (a, b, c, d, e):
         x.wait()
     p = []
+    expect("Learned the normal" in e.log() and "EARLY WARNING" not in e.log(), "no verdict until a full 3 days after learning", p)
     expect("Learned the normal pump speed: 2,400 rpm" in a.log() and "EARLY WARNING" in a.log(), "slow decline caught against the fixed normal", p)
     expect("Learning the new normal" in b.log() and "EARLY WARNING" not in b.log(), "faster = setting changed -> relearn", p)
     expect("EARLY WARNING" not in c.log(), "steady pump never warns", p)
-    expect("EARLY WARNING" not in d.log(), "no warning before 14 days", p)
+    expect("EARLY WARNING" not in d.log(), "no warning before 5 days", p)
     return p
 
 
 def t_health_samples_and_relearn():
-    r = Rig("health_sampling", HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=22)
+    r = Rig("health_sampling", EarlyWarning=True, HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=22)
     time.sleep(14)
     r.control("health-reset.json", "at", datetime.now())
     r.wait(); p = []

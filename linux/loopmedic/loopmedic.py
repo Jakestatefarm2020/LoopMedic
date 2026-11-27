@@ -374,7 +374,8 @@ class PowerOff:
 # ----------------------------------------------------------------- early warning: a pump slowing down
 # A pump usually wears out slowly before it stops: its speed creeps down over days or weeks. Every HealthSampleMinutes
 # (20) the readings of that window become one sample: the median pump speed (and CPU temperature) per CPU-load band,
-# so like is compared with like. Samples go to health-samples.jsonl (60 days kept). The first HealthLearnDays (14) of
+# so like is compared with like. Samples go to health-samples.jsonl (60 days kept). EXPERIMENTAL: off unless
+# "EarlyWarning": true (a setup question). The first HealthLearnDays (5) of
 # samples set the pump's NORMAL speed, kept in health.json: a fixed reference, so a slowly wearing pump can't drag its
 # own "normal" down with it. After that the last HealthRecentDays (3) are compared with it. HealthWarnPercent (12)
 # slower = a WARNING ONLY (log, tray notification, email if set up) - never a power-off, never DEGRADED. Clearly
@@ -486,7 +487,10 @@ class Health:
             parts = [f"{v:,.0f} rpm" + ("" if b == "all" else f" at {b} CPU load") for b, v in self.normal.items()]
             self.log(f"Learned the normal {self.what} speed: {', '.join(parts)}. Early warnings are on from now.")
             self._save()
-        cut = max(now - timedelta(days=self.recent_days), self.normal_until or datetime.min)
+        # judge only on a full recent window after learning (first verdict: learn_days + recent_days)
+        cut = now - timedelta(days=self.recent_days)
+        if self.normal_until and cut < self.normal_until:
+            return
         worst, worst_band, w_base, w_recent, fastest = 0.0, None, 0.0, 0.0, 0.0
         for b, base in self.normal.items():
             recent = [s[1][b][0] for s in usable if s[0] >= cut and b in s[1]]
@@ -1051,10 +1055,11 @@ def main(argv=None):
         return max(a.selftest_min_uptime, left)
 
     next_selftest = started + selftest_due(selftest)
-    # early warning (a pump slowing down over days): only with a real pump/fan sensor, never in simulations
+    # early warning (a pump slowing down over days): EXPERIMENTAL, off unless setup switched it on
+    # ("EarlyWarning": true). Only with a real pump/fan sensor, never in simulations.
     health = None
-    if pump and not simulating:
-        health = Health(a.data_dir, a.control_dir, pw, log, num("HealthSampleMinutes", 20), num("HealthLearnDays", 14),
+    if pump and not simulating and cfg.get("EarlyWarning") is True:
+        health = Health(a.data_dir, a.control_dir, pw, log, num("HealthSampleMinutes", 20), num("HealthLearnDays", 5),
                         num("HealthRecentDays", 3), num("HealthWarnPercent", 12), num("HealthMinReadings", 60),
                         lambda kind, text: mail.send(f"Early warning: {pw} slowing down" if kind == "warn" else f"{pw} speed back to normal", text))
         health.analyze(datetime.now())
@@ -1402,6 +1407,7 @@ def main(argv=None):
                 "lastPowerOff": lo,
                 "selfTest": {"at": selftest.get("at"), "ok": bool(selftest.get("ok"))} if selftest else None,
                 "mail": mail.on,
+                "earlyWarning": health is not None,
                 # early warning: the tray shows it once as a notification (never in the panel)
                 "healthWarning": health.status() if health else None,
                 "fans": [{"name": f.label, "rpm": rpm if (pump and f.id == pump.id) else f.read(), "pump": bool(pump and f.id == pump.id)} for f in fans],

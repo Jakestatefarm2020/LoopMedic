@@ -729,7 +729,8 @@ namespace LoopMedic
     // A pump usually wears out slowly before it stops: its speed creeps down over days or weeks. Every
     // HealthSampleMinutes (20) the watchdog turns the ~600 readings of that window into one sample: the median
     // pump speed (and CPU temperature) per CPU-load band, so like is compared with like. Samples go to
-    // health-samples.jsonl (60 days kept). The first HealthLearnDays (14) of samples set the pump's NORMAL speed,
+    // health-samples.jsonl (60 days kept). EXPERIMENTAL: off unless "EarlyWarning": true (a setup question).
+    // The first HealthLearnDays (5) of samples set the pump's NORMAL speed,
     // kept in health.json: a fixed reference, so a pump that wears out slowly can't drag its own "normal" down with
     // it. After that, the last HealthRecentDays (3) are compared with it. HealthWarnPercent (12) slower = a WARNING
     // ONLY: a line in the log, a Windows notification from the tray, and an email if mail is set up. It never
@@ -836,8 +837,9 @@ namespace LoopMedic
                           ". Early warnings are on from now.");
                 SaveState();
             }
+            // judge only on a full recent window after learning (first verdict: learnDays + recentDays)
             DateTime cut = wall.AddDays(-recentDays);
-            if (cut < normalUntil) cut = normalUntil;
+            if (cut < normalUntil) return;
             string worstBand = null; double worst = 0, wBase = 0, wRecent = 0, fastest = 0;
             foreach (var kv in normal)
             {
@@ -1158,9 +1160,10 @@ namespace LoopMedic
             string selfTestProblem = null;
             if (selfTest != null && Json.Str(selfTest, "ok") == "False") selfTestProblem = "Monthly self-test FAILED: " + Json.Str(selfTest, "detail");
             double nextSelfTestMono = started + SelfTestDue(selfTest, o);
-            // early warning (a pump slowing down over days): only with a real pump/fan sensor, never in simulations
-            HealthTracker health = pump != null && !simulating
-                ? new HealthTracker(Paths.Root, pw, Cfg("HealthSampleMinutes", 20), Cfg("HealthLearnDays", 14), Cfg("HealthRecentDays", 3),
+            // early warning (a pump slowing down over days): EXPERIMENTAL, off unless setup switched it on
+            // ("EarlyWarning": true). Only with a real pump/fan sensor, never in simulations.
+            HealthTracker health = pump != null && !simulating && Json.Bool(cfg, "EarlyWarning")
+                ? new HealthTracker(Paths.Root, pw, Cfg("HealthSampleMinutes", 20), Cfg("HealthLearnDays", 5), Cfg("HealthRecentDays", 3),
                                     Cfg("HealthWarnPercent", 12), (int)Cfg("HealthMinReadings", 60),
                                     (kind, text) => Mail.Send(kind == "warn" ? "Early warning: " + pw + " slowing down" : pw + " speed back to normal", text, false))
                 : null;
@@ -1473,6 +1476,7 @@ namespace LoopMedic
                     { "tripDeadline", trip != null ? Json.Iso(wall.AddSeconds(trip.DeadlineMono - now)) : null },
                     { "lastPowerOff", lastOffStatus },
                     { "mail", Mail.On },
+                    { "earlyWarning", health != null },
                     // early warning: the tray shows it once as a Windows notification (never in the panel)
                     { "healthWarning", health != null && health.WarningText != null ? new Dictionary<string, object> { { "id", Json.Iso(health.WarnedAt.Value) }, { "text", health.WarningText } } : null },
                     { "selfTest", selfTest != null ? new Dictionary<string, object> { { "at", Json.Str(selfTest, "at") }, { "ok", Json.Str(selfTest, "ok") == "True" } } : null },

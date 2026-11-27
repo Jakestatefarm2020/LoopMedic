@@ -4,76 +4,60 @@
 
 <p align="center"><img src="docs/panel.png" alt="The LoopMedic tray panel: live pump speed and CPU temperature with graphs, trip limits, today's peaks and every fan header" width="340"></p>
 
-LoopMedic runs quietly in the background from startup. Every 2 seconds it reads the pump speed
-(from the motherboard fan header the pump's speed cable plugs into) and the CPU temperature.
+LoopMedic runs quietly from startup and checks the pump speed and CPU temperature every 2 seconds.
 
-| When...                                     | for...                   | then...                                                                 |
-|---------------------------------------------|--------------------------|-------------------------------------------------------------------------|
-| the pump has **stopped** (150 rpm or less)  | 10 s                     | an alarm with a 30 s countdown; if nobody chooses, the PC powers off (5 s if the CPU is already over its limit) |
-| the CPU is at or above its limit            | 30 s (60 s on some chips) | same                                                                    |
-| the pump is **slower** than usual (under 500 rpm, but spinning) | 10 s | a warning only - the PC is not powered off for this                 |
-| the pump has slowly run **12% slower** than its learned normal | 3 days | an early warning (one notification) - pumps often slow down as they wear out |
+| When...                                     | for...                    | then...                                                     |
+|---------------------------------------------|---------------------------|-------------------------------------------------------------|
+| the pump has **stopped** (150 rpm or less)  | 10 s                      | an alarm with a 30 s countdown, then a forced power-off     |
+| the CPU is at or above its limit            | 30 s (60 s on some chips) | same                                                        |
+| the pump is **slower** than usual           | 10 s                      | a warning only                                              |
 
-A tray icon shows it's working, with live pump, CPU and fan readings. It never changes a fan or pump
-speed and leaves your cooler's own app alone. It runs a self-check at every boot and a self-test once a
-month, and after a forced power-off it tells you why the PC turned off.
+It only reads sensors: it never changes a fan or pump speed and leaves your cooler's app alone.
 
-- **AIO or air cooler.** With an air cooler, the CPU fan takes the pump's place: same rules.
-- **Early warning.** It learns your pump's normal speed over two weeks (per CPU-load band), then warns you
-  if it slowly runs slower. Warning only, never a power-off.
-- **Email alerts (optional).** Through your own SMTP server: powering off, back on, warnings, a failed
-  self-test. Set up during install or later in `mail.json`; the password is encrypted on the PC. It's the
-  only thing LoopMedic ever sends out, and only if you set it up.
-- **Themes.** Stealth (default), Atomic, Dark Side and Ice. Status colours stay the same in every theme.
+**Also:** air coolers (the CPU fan takes the pump's place) · optional email alerts through your own mail
+server · four tray themes · a self-check at every boot and a self-test every month · an **experimental**
+early warning for a pump that is slowly slowing down (off unless you turn it on in setup).
 
-> **No warranty.** LoopMedic is an *extra* layer of protection, not a replacement for the ones your PC
-> already has (BIOS fan-fail and temperature shutdowns, the CPU's own thermal limits). It can miss a
-> failure, and it can power your PC off when nothing is wrong. Use it at your own risk; see
-> [LICENSE.md](LICENSE.md).
+> **No warranty.** LoopMedic is an *extra* layer of protection on top of the ones your PC already has (BIOS
+> fan-fail and temperature shutdowns, the CPU's own thermal limits). It can miss a failure, and it can power
+> your PC off when nothing is wrong. Use it at your own risk; see [LICENSE.md](LICENSE.md).
 
 ## Download
 
-Get the latest package from the [Releases](../../releases) page:
+From the [Releases](../../releases) page:
 
 - **Windows 10 / 11:** `LoopMedic.zip` - unzip, run `Install.bat`, follow the setup.
-  Read [windows/package/README.txt](windows/package/README.txt) first.
-- **Linux (systemd):** `LoopMedic-Linux.tar.gz` - unpack, run `bash install.sh` as your normal user (it asks for your password when it needs it).
-  Read [linux/README.txt](linux/README.txt) first.
+  Guide: [windows/package/README.txt](windows/package/README.txt)
+- **Linux (systemd):** `LoopMedic-Linux.tar.gz` - unpack, run `bash install.sh` as your normal user.
+  Guide: [linux/README.txt](linux/README.txt)
 
-**Updates:** click the version number next to "LoopMedic" at the top of the tray panel. It asks GitHub for the
-latest release, shows what's new, and on **Update now** downloads it, checks its signature and installs it,
-keeping your settings. Nothing checks in the background. Every release package is signed with the author's
-release key (RSA-3072, SHA-256); the trays carry the public half and refuse a package whose signature doesn't
-match, so a tampered download is never installed. `tools/pack-release.py` signs the packages.
+**Updating:** click the version number at the top of the tray panel. Nothing checks in the background.
+Releases are signed, and the tray refuses a download whose signature doesn't match.
 
-## What's in this repo
+<details>
+<summary><b>For developers</b>: repo layout, building, tests</summary>
 
 ```
 windows/   C# watchdog (src/), tray app (tray/), installer + setup scripts, tests
-           built on your PC by build.ps1 with the .NET Framework compiler that ships with Windows
-linux/     Python (standard library) watchdog as a systemd service, PySide6 tray app, setup, tests
-tools/     pack-release.py - builds both release packages; panel-screenshot.py - docs/panel.png on made-up
-           sensor values; real-tests/ - real power-off and pop-up tests (admin)
+linux/     Python (standard library) systemd service, PySide6 tray, setup, tests
+tools/     pack-release.py (builds + signs both packages), panel-screenshot.py, real-tests/
 ```
 
-Both versions share the same version numbers, rules and CPU limit table (`cpu-limits.json`).
-How the Windows version is put together, including its threat model:
-[windows/ARCHITECTURE.md](windows/ARCHITECTURE.md).
-
-### Building from source
-
 - **Windows:** put the [LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-  0.9.6 DLLs in `windows/lhm/`, then run `windows/build.ps1`. `windows/tests/run-tests.py` runs the
-  test scenarios against the built exe (simulated sensors, never powers off).
-- **Linux:** nothing to build. `linux/tests/run-tests.py` runs the test scenarios.
-- **Release packages:** `python tools/pack-release.py [output folder]`. Also needs the signed
-  [PawnIO](https://pawnio.eu) installer in `windows/package/pawnio/` and the release signing key. Only the
-  author has the key, so packages you build yourself won't be accepted by the trays' updater.
+  0.9.6 DLLs in `windows/lhm/`, run `windows/build.ps1`, then `windows/tests/run-tests.py` (fake sensors,
+  never powers off).
+- **Linux:** nothing to build; `linux/tests/run-tests.py`.
+- **Packages:** `python tools/pack-release.py [folder]`. Needs the signed [PawnIO](https://pawnio.eu)
+  installer in `windows/package/pawnio/` and the author's release key, so packages you build yourself won't
+  pass the trays' updater.
+
+How it works, including the threat model: [windows/ARCHITECTURE.md](windows/ARCHITECTURE.md).
+What changed: [windows/CHANGELOG.md](windows/CHANGELOG.md) · [linux/CHANGELOG.md](linux/CHANGELOG.md).
+
+</details>
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE.md) - free to use, change and share for any noncommercial
-purpose. Commercial use needs the author's permission.
-
-Third-party parts (LibreHardwareMonitorLib, PawnIO) keep their own licenses; see
-[windows/package/THIRD-PARTY-NOTICES.txt](windows/package/THIRD-PARTY-NOTICES.txt).
+[PolyForm Noncommercial 1.0.0](LICENSE.md): free to use, change and share for any noncommercial purpose.
+Commercial use needs the author's permission. Third-party parts (LibreHardwareMonitorLib, PawnIO) keep their
+own licenses: [THIRD-PARTY-NOTICES.txt](windows/package/THIRD-PARTY-NOTICES.txt).

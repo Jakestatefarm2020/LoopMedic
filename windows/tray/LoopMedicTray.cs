@@ -76,7 +76,7 @@ namespace LoopMedicTray
         public DateTime? LastPowerOffAt, SelfTestAt;
         public string LastPowerOffReason;
         public string HealthId, HealthText;
-        public bool MailOn;   // early warning (pump slowing down): a notification only, never drawn in the panel
+        public bool MailOn, EarlyWarningOn;   // early warning (pump slowing down): a notification only, never drawn in the panel
         public bool SelfTestOk;
         public string CpuName = "";
         public DateTime? PausedUntil, TripDeadline;
@@ -134,6 +134,7 @@ namespace LoopMedicTray
                 }
                 object mo;
                 st.MailOn = d.TryGetValue("mail", out mo) && mo is bool && (bool)mo;
+                st.EarlyWarningOn = d.TryGetValue("earlyWarning", out mo) && mo is bool && (bool)mo;
                 if (d.TryGetValue("healthWarning", out sub) && sub is Dictionary<string, object>)
                 {
                     var hw = (Dictionary<string, object>)sub;
@@ -349,6 +350,7 @@ namespace LoopMedicTray
                 miPause.Text = Current.State == "PAUSED" ? "Resume protection" : "Pause 30 min";
                 foreach (ToolStripMenuItem t in miThemes.DropDownItems) t.Checked = t.Text == Theme.Name;
                 miRelearn.Text = "Relearn normal " + Current.cooler + " speed";
+                miRelearn.Visible = Current.EarlyWarningOn;   // only with the (experimental) early warning on
                 miMail.Visible = Current.MailOn;   // only once email alerts are set up (mail.json)
             };
 
@@ -458,10 +460,10 @@ namespace LoopMedicTray
         {
             string w = Current.cooler;
             if (MessageBox.Show("Forget what LoopMedic has learned about your " + w + "'s normal speed and learn it again?\n\n" +
-                                "Use this after you change the " + w + " speed on purpose. Learning takes about 2 weeks, and early warnings " +
+                                "Use this after you change the " + w + " speed on purpose. Learning takes about 5 days, and early warnings " +
                                 "pause until then. Protection (power-off when the " + w + " stops or the CPU overheats) is not affected.",
                                 "LoopMedic", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            if (WriteControl("health-reset.json", "at", DateTime.Now, true)) Balloon("LoopMedic is learning your " + w + "'s normal speed again (about 2 weeks).");
+            if (WriteControl("health-reset.json", "at", DateTime.Now, true)) Balloon("LoopMedic is learning your " + w + "'s normal speed again (about 5 days).");
         }
 
         void Notify()

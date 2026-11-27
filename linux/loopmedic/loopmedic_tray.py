@@ -265,7 +265,7 @@ class Status:
         self.paused_until = self.trip_deadline = None
         self.trip_kind = self.trip_reason = None
         self.cpu_name = ""
-        self.mail_on = False
+        self.mail_on = self.early_on = False
         self.health_id = self.health_text = None   # early warning: a notification only, never drawn in the panel
         self.fans = []
         self.read_ok = False    # file read and parsed (False = missing, mid-write or garbled)
@@ -309,6 +309,7 @@ class Status:
         st.trip_kind, st.trip_reason = d.get("tripKind"), d.get("tripReason")
         st.cpu_name = str(d.get("cpuName") or "")
         st.mail_on = d.get("mail") is True
+        st.early_on = d.get("earlyWarning") is True
         hw = d.get("healthWarning")
         if isinstance(hw, dict) and hw.get("id") and hw.get("text"):
             st.health_id, st.health_text = str(hw["id"]), str(hw["text"])
@@ -967,6 +968,7 @@ class TrayApp:
                 self.last_heartbeat = datetime.now()
         self.act_pause.setText("Resume protection" if st.state == "PAUSED" else "Pause 30 min")
         self.act_relearn.setText(f"Relearn normal {st.cooler} speed")
+        self.act_relearn.setVisible(st.early_on)   # only with the (experimental) early warning on
         self.act_mail.setVisible(st.mail_on)   # only once email alerts are set up (mail.json)
         self.notify_health()
 
@@ -1095,10 +1097,10 @@ class TrayApp:
         w = self.current.cooler
         q = QMessageBox.question(None, "LoopMedic",
                                  f"Forget what LoopMedic has learned about your {w}'s normal speed and learn it again?\n\n"
-                                 f"Use this after you change the {w} speed on purpose. Learning takes about 2 weeks, and early warnings "
+                                 f"Use this after you change the {w} speed on purpose. Learning takes about 5 days, and early warnings "
                                  f"pause until then. Protection (power-off when the {w} stops or the CPU overheats) is not affected.")
         if q == QMessageBox.Yes and self.write_control("health-reset.json", "at", datetime.now(), True):
-            self.balloon(f"LoopMedic is learning your {w}'s normal speed again (about 2 weeks).")
+            self.balloon(f"LoopMedic is learning your {w}'s normal speed again (about 5 days).")
 
     def mail_test(self):
         if self.write_control("mail-test.json", "at", datetime.now(), True):

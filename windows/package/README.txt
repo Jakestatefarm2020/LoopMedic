@@ -42,10 +42,11 @@ CPU and fan readings.
 AIR COOLER? Setup asks what cools your CPU. With an air cooler, the CPU
 fan takes the pump's place: same rules, "CPU fan" instead of "pump".
 
-EARLY WARNING: in the background LoopMedic also learns your pump's
-normal speed (about 2 weeks), then warns you if it slowly runs slower -
-pumps often do that as they wear out. That's a Windows notification (it
-stays in the notification center) and a log line - never a power-off.
+EARLY WARNING (EXPERIMENTAL, off unless you turn it on in setup):
+LoopMedic learns your pump's normal speed (about 5 days), then warns you
+if it slowly runs slower - pumps often do that as they wear out. A
+Windows notification and a log line, never a power-off. Only briefly
+tested so far, so it may give false warnings.
 
 EMAIL ALERTS (optional): with your own mail server, LoopMedic can email
 you when it powers the PC off, when it's back on, when a warning starts
@@ -108,6 +109,8 @@ INSTALL (about 3 minutes)
             Pick 0 if your pump isn't on a motherboard header.
             Air cooler: a CPU fan that stops at idle ("zero RPM" / fan
             stop in the BIOS) can't be watched - setup tells you.
+            It then asks whether to turn on the EXPERIMENTAL early
+            warning (see below). N is fine; Y if you'd like to try it.
 
    Step 4 - Suggests a CPU temperature limit for YOUR chip (from a table
             of common AMD and Intel CPUs). Press Enter to take it, type
@@ -173,12 +176,13 @@ under the ^ arrow - drag it onto the taskbar to keep it visible).
                    yellow), Dark Side (blue and pink), Ice (white).
                    Status colours never change: green ARMED / Live,
                    orange warnings, red alarms.
-                 - Relearn normal pump speed (see EARLY WARNING)
+                 - Relearn normal pump speed (only with the early
+                   warning on, see EARLY WARNING)
                  - Send a test email (only once email alerts are on)
                  - Exit tray icon (only hides the icon - protection
                    keeps running)
 
-UPDATES: click the version number (e.g. "v2.2.0") at the top of the panel.
+UPDATES: click the version number (e.g. "v2.3.0") at the top of the panel.
 It turns blue when you point at it. LoopMedic asks GitHub for the newest
 version and either says you're up to date or shows what's new with an
 "Update now" button. Update now downloads it, checks it is genuinely
@@ -238,9 +242,10 @@ log: Event Viewer > Windows Logs > Application, source "LoopMedic".
   loopmedic.log has every line too.
 
 Other lines you may see in the log (none of them powers anything off):
-  Pump jump: 2400 -> 4600 -> 2400 rpm (one reading, came straight back
-             - ignored)
-               a single bad reading (see PUMP READINGS below)
+  OK ... 3 one-reading pump glitches ignored   (in the hourly line)
+               single bad readings (see PUMP READINGS below)
+  EARLY WARNING: ...   only with the experimental early warning on
+  Mail: ...            email alerts: settings loaded, sent, or why not
   Pump jump: 2400 -> 3600 rpm (confirmed by the next reading)
                the pump really did speed up (your cooler app changed it)
   Stalled: no check for 12 s
@@ -387,8 +392,13 @@ THE TRAY ICON). By hand: unzip the new LoopMedic.zip and run Install.bat.
 
 
 --------------------------------------------------------------------------
-EARLY WARNING: A PUMP SLOWING DOWN
+EARLY WARNING: A PUMP SLOWING DOWN  (EXPERIMENTAL)
 --------------------------------------------------------------------------
+
+Off unless you said Y to it in setup (step 3). It has only been briefly
+tested: treat a warning as "worth a look", not as proof of a bad pump.
+A pump that follows the liquid temperature can also run slower in a
+colder room, which can look like wear.
 
 Pumps usually wear out slowly before they stop. Three times an hour
 LoopMedic saves a "health sample": the middle value of about 600 pump
@@ -396,8 +406,8 @@ readings, kept apart by how busy the CPU was (light / medium / heavy),
 so like is compared with like. Only normal running counts: not the
 first 5 minutes after start or waking, not while paused or alarming.
 
-* The first 2 weeks set your pump's NORMAL speed.
-* After that, if the last 3 days run 12% or more slower than normal,
+* The first 5 days set your pump's NORMAL speed.
+* After that (from day 8), if the last 3 days run 12% or more slower,
   you get ONE Windows notification (it stays in the notification
   center) and an "EARLY WARNING" line in the log - plus an email if
   email alerts are on. It repeats after a week, or sooner if it gets
@@ -458,7 +468,8 @@ CHANGE SETTINGS / REMOVE
     HotShutdownDelaySeconds (5)    the countdown when already too hot
     CoolerType ("aio")       "air" = watch the CPU fan instead of a pump
     HealthWarnPercent (12)   early warning: how much slower than normal
-    HealthLearnDays (14)     early warning: days to learn the normal
+    HealthLearnDays (5)      early warning: days to learn the normal
+    EarlyWarning (false)     the experimental early warning on / off
 
 * Remove completely: double-click Uninstall.bat.
 

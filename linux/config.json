@@ -14,5 +14,6 @@
   "ShutdownDelaySeconds": 30,
   "HotShutdownDelaySeconds": 5,
   "RearmSeconds": 120,
-  "HeartbeatMinutes": 60
+  "HeartbeatMinutes": 60,
+  "EarlyWarning": false
 }

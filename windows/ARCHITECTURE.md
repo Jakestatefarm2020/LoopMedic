@@ -72,7 +72,9 @@ All durations use a monotonic clock (Stopwatch), so a clock change can't delay a
 turned into a monotonic deadline when the file is first seen. The deadline is capped at 2 h from the file's
 write time, and files dated more than 5 min in the future are ignored.
 
-## Early warning (a pump slowing down)
+## Early warning (a pump slowing down) - experimental
+
+Off unless `EarlyWarning` is true (a setup question, default no). Briefly tested only.
 
 Accepted readings go into the current 20-minute window (`HealthSampleMinutes`), but only while running
 normally: pump known good and above the stopped line, no pause or trip, and at least 5 min after start or
@@ -80,14 +82,18 @@ after a 10 s+ stall (sleep). Each reading is filed under the CPU load band at th
 light < 25 %, medium < 60 %, heavy; "all" without a load sensor). At the end of the window, each band with
 ≥ 60 readings becomes one sample (median rpm, median °C, count) appended to `health-samples.jsonl`.
 
-The first `HealthLearnDays` (14) of samples set the **normal** per band (median of ≥ 36 samples), kept in
-`health.json`. It is fixed so that a slow decline can't drag its own baseline down. Each new sample compares
-the median of the last `HealthRecentDays` (3, ≥ 18 samples) with the normal:
+The first `HealthLearnDays` (5) of samples set the **normal** per band (median of ≥ 36 samples), kept in
+`health.json`. It is fixed so that a slow decline can't drag its own baseline down. Once a full
+`HealthRecentDays` (3) window has passed after learning (day 8), each new sample compares the median of the
+last 3 days (≥ 18 samples) with the normal:
 - ≥ `HealthWarnPercent` (12 %) slower in any band: `EARLY WARNING` log line, `healthWarning` {id, text} in
   status.json (the tray shows it once per id as a notification, never in the panel), and an email.
   Repeats after 7 days or 5 points worse; clears below half the threshold.
 - ≥ 12 % faster with nothing slower: the curve was changed, so the samples and normal are reset and
   learning starts again. `control\health-reset.json` (tray: Relearn) does the same on request.
+
+Known limit: a pump that follows the liquid temperature runs slower in a colder room, which looks like wear.
+That's one reason it is experimental and warning-only.
 
 ## Email alerts
 
@@ -128,10 +134,10 @@ important ones retry for ~15 min, others are capped at 6 an hour). A trip never 
 ## Tests
 
 `tests\run-tests.py` runs the real exe against fake sensors (`--fake-sensors` JSON), in dry-run mode, with the
-Event Log off. It covers 34 scenarios: trips, the jump rule, slow-pump warnings, clock jumps, cancel, hotter =
+Event Log off. It covers 35 scenarios: trips, the jump rule, slow-pump warnings, clock jumps, cancel, hotter =
 faster, pause limits, a sensor vanishing, CPU changes, broken config, missing privilege, self-tests, last
 power-off, temperature-only mode, air cooler mode, supervisor restarts after a crash or a hang, the early
-warning (a dying pump, a slow decline, a raised curve, a steady pump, still learning, sampling and relearn)
+warning (off by default, a dying pump, a slow decline, a raised curve, a steady pump, still learning, sampling and relearn)
 and email alerts against a local fake mail server (trip email, encrypted password, live reload, a broken
 file, test emails, and a dead server that must not delay the power-off).
 

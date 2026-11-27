@@ -287,12 +287,23 @@ try {
     }
     $c.Close()
 
+    # ---- optional: early warning (experimental)
+    $early = $false
+    if ($pump) {
+        Write-Host ''
+        Write-Host "EXPERIMENTAL: early warning for a $what slowing down." -ForegroundColor Yellow
+        Write-Host "LoopMedic learns your $what's normal speed over about 5 days, then warns you (a notification, never a"
+        Write-Host "power-off) if it runs 12% slower for 3 days. It has only been briefly tested and may give false warnings."
+        $early = Read-YesNo 'Turn on the experimental early warning?'
+    }
+
     $cfgPath = Join-Path $here 'config.json'
     $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
     $cfg.PumpSensorId = if ($pump) { $pump.Identifier.ToString() } else { '' }
     $cfg.CpuTempSensorId = if ($cpuTemp) { $cpuTemp.Identifier.ToString() } else { '' }
     $cfg.CpuMaxTempC = $maxTemp
     $cfg | Add-Member -NotePropertyName CoolerType -NotePropertyValue $(if ($air) { 'air' } else { 'aio' }) -Force
+    $cfg | Add-Member -NotePropertyName EarlyWarning -NotePropertyValue $early -Force
     if ($air) {
         # CPU fans idle much slower than pumps: warn below 250 rpm (or 60% of what it reads now, if that's lower),
         # but always above the 150 rpm "stopped" line. The stopped rule itself is the same as for a pump.
