@@ -6,7 +6,7 @@ Runs the real loopmedic/loopmedic.py against fake /sys + /proc trees in throwawa
     python3 tests/run-tests.py               all scenarios (in parallel, ~1.5 min)
     python3 tests/run-tests.py spike cancel  only the ones whose names contain these words
 """
-import json, os, subprocess, sys, tempfile, threading, time
+import base64, json, os, socket, socketserver, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,7 +58,8 @@ class Rig:
         args = [sys.executable, SRC, "--config", os.path.join(self.root, "config.json"), "--cpu-limits", LIMITS,
                 "--state-dir", self.root, "--data-dir", self.root, "--control-dir", os.path.join(self.root, "control"),
                 "--log", os.path.join(self.root, "pg.log"), "--sysfs", os.path.join(self.root, "sys"),
-                "--proc", os.path.join(self.root, "proc"), "--dry-run", *[str(x) for x in extra]]
+                "--proc", os.path.join(self.root, "proc"), "--mail", os.path.join(self.root, "mail.json"),
+                "--mail-check-seconds", "2", "--dry-run", *[str(x) for x in extra]]
         if duration:
             args += ["--duration", str(duration)]
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -321,6 +322,188 @@ def t_air_cooler_fan_stops():
     expect("air cooler" in log and "CPU fan: Fan #2" in log, "start line names the CPU fan", p)
     expect("CPU fan stopped: 0 rpm" in log, "a stopped CPU fan is watched like a stopped pump", p)
     expect("CPU fan at 0 rpm" in log and "would power off in 3s" in log, "same trip rule (CPU hot -> short countdown)", p)
+    return p
+
+
+def health_history(rig, days, rpm_at, per_day=24, band="light"):
+    """Pre-write `days` of health samples (newest last). rpm_at(days_ago) -> median rpm for that sample."""
+    now = datetime.now()
+    lines = []
+    for i in range(days * per_day, 0, -1):
+        ago = i / per_day
+        at = (now - timedelta(days=ago)).astimezone().isoformat()
+        lines.append(json.dumps({"at": at, "bands": {band: [round(rpm_at(ago), 1), 45.0, 60]}}))
+    with open(os.path.join(rig.root, "health-samples.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+class FakeSmtp:
+    """A tiny local mail server (plain SMTP, accepts any login) that keeps what it receives."""
+
+    def __init__(self):
+        self.mails, self.logins = [], []
+        box = self
+
+        class H(socketserver.StreamRequestHandler):
+            def handle(self):
+                def say(t):
+                    self.wfile.write((t + "\r\n").encode())
+                say("220 fake ESMTP")
+                data, in_data, auth = [], False, None
+                while True:
+                    raw = self.rfile.readline()
+                    if not raw:
+                        return
+                    line = raw.decode(errors="replace").rstrip("\r\n")
+                    if in_data:
+                        if line == ".":
+                            in_data = False; box.mails.append("\n".join(data)); data = []; say("250 queued")
+                        else:
+                            data.append(line[1:] if line.startswith("..") else line)
+                        continue
+                    if auth:
+                        box.logins.append(line); auth -= 1
+                        say("334 UGFzc3dvcmQ6" if auth else "235 ok")
+                        continue
+                    cmd = line.upper()
+                    if cmd.startswith("EHLO"):
+                        self.wfile.write(b"250-fake\r\n250 AUTH LOGIN\r\n")
+                    elif cmd.startswith("AUTH LOGIN"):
+                        parts = line.split()
+                        if len(parts) > 2:      # user name sent with the command
+                            box.logins.append(parts[2]); auth = 1; say("334 UGFzc3dvcmQ6")
+                        else:
+                            auth = 2; say("334 VXNlcm5hbWU6")
+                    elif cmd == "DATA":
+                        in_data = True; say("354 go")
+                    elif cmd == "QUIT":
+                        say("221 bye"); return
+                    else:
+                        say("250 ok")
+
+        self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def subjects(self):
+        return [l for m in self.mails for l in m.split("\n") if l.lower().startswith("subject:")]
+
+
+def free_port():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close()
+    return p
+
+
+def mail_json(port, enabled=True):
+    return {"Enabled": enabled, "Server": "127.0.0.1", "Port": port, "Security": "none", "Username": "alerts@example.com",
+            "Password": "hunter2-test", "From": "alerts@example.com", "To": "me@example.com"}
+
+
+def write_mail(rig, port, enabled=True):
+    w(os.path.join(rig.root, "mail.json"), json.dumps(mail_json(port, enabled)))
+
+
+def t_health_dying_pump():
+    r = Rig("health_dying")
+    health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)
+    r.start(duration=6)
+    time.sleep(4); st = r.status()
+    r.wait(); log = r.log(); p = []
+    expect("EARLY WARNING: Your pump has run 15% slower" in log, "15% slower for 3 days -> early warning", p)
+    expect("slower than its normal" in ((st.get("healthWarning") or {}).get("text") or ""), "warning handed to the tray", p)
+    expect(st.get("state") in ("ARMED", "STARTING") and not st.get("degraded"), f"a warning only ({st.get('state')})", p)
+    return p
+
+
+def t_health_slow_decline_and_raise():
+    a = Rig("health_decline"); health_history(a, 37, lambda ago: 2400 if ago >= 23 else 2400 - (23 - ago) * 20)
+    b = Rig("health_raised"); health_history(b, 30, lambda ago: 2800 if ago <= 3 else 2400)
+    c = Rig("health_steady"); health_history(c, 30, lambda ago: 2400 + (ago % 1) * 20)
+    d = Rig("health_learning"); health_history(d, 5, lambda ago: 2000 if ago <= 2 else 2400)
+    for x in (a, b, c, d):
+        x.start(duration=5)
+    for x in (a, b, c, d):
+        x.wait()
+    p = []
+    expect("Learned the normal pump speed: 2,400 rpm" in a.log() and "EARLY WARNING" in a.log(), "slow decline caught against the fixed normal", p)
+    expect("Learning the new normal" in b.log() and "EARLY WARNING" not in b.log(), "faster = setting changed -> relearn", p)
+    expect("EARLY WARNING" not in c.log(), "steady pump never warns", p)
+    expect("EARLY WARNING" not in d.log(), "no warning before 14 days", p)
+    return p
+
+
+def t_health_samples_and_relearn():
+    r = Rig("health_sampling", HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=22)
+    time.sleep(14)
+    r.control("health-reset.json", "at", datetime.now())
+    r.wait(); p = []
+    path = os.path.join(r.root, "health-samples.jsonl")
+    lines = open(path, encoding="utf-8").read().split("\n") if os.path.exists(path) else []
+    lines = [l for l in lines if l.strip()]
+    expect("Relearn requested from the tray" in r.log(), "relearn request handled", p)
+    expect(len(lines) >= 1, f"samples written after the relearn ({len(lines)})", p)
+    if lines:
+        s = json.loads(lines[-1])
+        expect("all" in s["bands"] and abs(s["bands"]["all"][0] - 2400) < 1, f"sample = median rpm of the window ({s})", p)
+    return p
+
+
+def t_mail_on_trip_password_scrambled():
+    smtp = FakeSmtp()
+    r = Rig("mail_trip", temp=92)
+    write_mail(r, smtp.port)
+    r.start(duration=18)
+    time.sleep(5); r.set_pump(0)
+    r.wait(); log = r.log(); p = []
+    text = open(os.path.join(r.root, "mail.json"), encoding="utf-8").read()
+    expect("hunter2-test" not in text and '"PasswordProtected"' in text, "password scrambled in mail.json", p)
+    expect(any("POWERING OFF" in s for s in smtp.subjects()), f"power-off email received ({smtp.subjects()})", p)
+    expect(any(base64.b64decode(l).decode(errors="replace") == "hunter2-test" for l in smtp.logins if l), "server got the real password back", p)
+    expect("WOULD POWER OFF NOW" in log, "the power-off still happened", p)
+    return p
+
+
+def t_mail_reload_bad_json_and_warning():
+    smtp = FakeSmtp()
+    r = Rig("mail_reload")
+    write_mail(r, smtp.port, enabled=False)
+    r.start(duration=30)
+    time.sleep(4); write_mail(r, smtp.port)
+    time.sleep(6)
+    with open(os.path.join(r.root, "mail.json"), "w", encoding="utf-8") as f:
+        f.write('{ "Enabled": true, "Server": ')
+    time.sleep(5); r.set_pump(400)
+    r.wait(); log = r.log(); p = []
+    expect("Email alerts on" in log, "change picked up without a restart", p)
+    expect("has a mistake" in log, "broken mail.json logged", p)
+    expect(any("Warning" in s and "slower" in s for s in smtp.subjects()), f"warning email sent with the old settings ({smtp.subjects()})", p)
+    return p
+
+
+def t_mail_test_email_and_server_down():
+    smtp = FakeSmtp()
+    a = Rig("mail_test"); write_mail(a, smtp.port)
+    out = subprocess.run([sys.executable, SRC, "--test-mail", "--mail", os.path.join(a.root, "mail.json"), "--data-dir", a.root,
+                          "--log", os.path.join(a.root, "pg.log")], capture_output=True, text=True, timeout=60)
+    b = Rig("mail_tray_test"); write_mail(b, smtp.port)
+    b.start(duration=10)
+    time.sleep(4); b.control("mail-test.json", "at", datetime.now())
+    c = Rig("mail_down", temp=92); write_mail(c, free_port())
+    c.start(duration=16)
+    time.sleep(5); c.set_pump(0)
+    b.wait(); c.wait(); p = []
+    expect(out.returncode == 0 and "Test email sent" in out.stdout, f"--test-mail ({out.returncode}: {out.stdout.strip()} {out.stderr[-200:]})", p)
+    expect(sum("test email" in s for s in smtp.subjects()) == 2, f"two test emails ({smtp.subjects()})", p)
+    log = c.log()
+
+    def at(text):
+        line = next((l for l in log.splitlines() if text in l), None)
+        return datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S") if line else None
+    t0, t1 = at("would power off in 3s"), at("WOULD POWER OFF NOW")
+    took = (t1 - t0).total_seconds() if t0 and t1 else 999
+    expect(took <= 4, f"3 s countdown kept with the mail server down ({took} s)", p)
+    expect("Mail: not sent" in log, "failed send logged", p)
     return p
 
 

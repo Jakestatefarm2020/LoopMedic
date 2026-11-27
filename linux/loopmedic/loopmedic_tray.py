@@ -265,6 +265,8 @@ class Status:
         self.paused_until = self.trip_deadline = None
         self.trip_kind = self.trip_reason = None
         self.cpu_name = ""
+        self.mail_on = False
+        self.health_id = self.health_text = None   # early warning: a notification only, never drawn in the panel
         self.fans = []
         self.read_ok = False    # file read and parsed (False = missing, mid-write or garbled)
 
@@ -306,6 +308,10 @@ class Status:
         st.trip_deadline = parse_when(d.get("tripDeadline"))
         st.trip_kind, st.trip_reason = d.get("tripKind"), d.get("tripReason")
         st.cpu_name = str(d.get("cpuName") or "")
+        st.mail_on = d.get("mail") is True
+        hw = d.get("healthWarning")
+        if isinstance(hw, dict) and hw.get("id") and hw.get("text"):
+            st.health_id, st.health_text = str(hw["id"]), str(hw["text"])
         for f in d.get("fans") or []:
             if isinstance(f, dict):
                 r = f.get("rpm")
@@ -801,6 +807,8 @@ class TrayApp:
         self.started = datetime.now()
         self.seen_off_path = os.path.join(os.path.expanduser("~"), ".local", "state", "loopmedic", "seen-poweroff.txt")
         self.seen_off_checked = False
+        self.seen_health_path = os.path.join(os.path.expanduser("~"), ".local", "state", "loopmedic", "seen-health.txt")
+        self.shown_health = set()
         self.update_busy = False
         self.bridge = Bridge()
         self.bridge.done.connect(lambda f: f())   # run a callable on the Qt thread
@@ -818,6 +826,11 @@ class TrayApp:
         self.act_test.triggered.connect(self.run_test)
         self.act_log.triggered.connect(self.open_log)
         self.act_exit.triggered.connect(QApplication.quit)
+        self.act_relearn = QAction("Relearn normal pump speed")
+        self.act_relearn.triggered.connect(self.relearn)
+        self.act_mail = QAction("Send a test email")
+        self.act_mail.triggered.connect(self.mail_test)
+        self.act_mail.setVisible(False)
         for x in (self.act_open, self.act_pause, self.act_test, self.act_log):
             menu.addAction(x)
         themes = menu.addMenu("Themes")
@@ -828,6 +841,8 @@ class TrayApp:
             act.setChecked(name == T.name)
             act.triggered.connect(lambda _=False, n=name: self.set_theme(n))
             themes.addAction(act)
+        menu.addAction(self.act_relearn)
+        menu.addAction(self.act_mail)
         menu.addSeparator()
         menu.addAction(self.act_exit)
         self.menu = menu
@@ -951,6 +966,9 @@ class TrayApp:
             if self.write_control("tray.json", "at", datetime.now(), False):
                 self.last_heartbeat = datetime.now()
         self.act_pause.setText("Resume protection" if st.state == "PAUSED" else "Pause 30 min")
+        self.act_relearn.setText(f"Relearn normal {st.cooler} speed")
+        self.act_mail.setVisible(st.mail_on)   # only once email alerts are set up (mail.json)
+        self.notify_health()
 
         tripping = st.state in ("TRIPPED", "TEST") and st.trip_deadline is not None
         if tripping and st.trip_deadline != self.popup_deadline:
@@ -1047,6 +1065,44 @@ class TrayApp:
                               f"{st.last_off_at:%d %b at %H:%M}: {st.last_off_reason}\n"
                               "Check the pump/cooler before heavy use. Details: journalctl -t loopmedic",
                               QSystemTrayIcon.Critical, 20000)
+
+    def notify_health(self):
+        """Early warning (the pump has been slowing down for days): one notification per warning, remembered per user."""
+        st = self.current
+        if not st.health_id or st.health_id in self.shown_health:
+            return
+        self.shown_health.add(st.health_id)
+        try:
+            with open(self.seen_health_path, encoding="utf-8") as f:
+                seen = [l.strip() for l in f if l.strip()]
+        except OSError:
+            seen = []
+        if st.health_id in seen:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.seen_health_path), exist_ok=True)
+            with open(self.seen_health_path, "w", encoding="utf-8") as f:
+                f.write("\n".join((seen + [st.health_id])[-20:]) + "\n")
+        except OSError:
+            pass
+        title = f"LoopMedic early warning: {st.cooler} slowing down"
+        if shutil.which("notify-send"):   # stays in the notification history
+            subprocess.Popen(["notify-send", "-a", "LoopMedic", "-i", "dialog-warning", title, st.health_text])
+        else:
+            self.tray.showMessage(title, st.health_text, QSystemTrayIcon.Warning, 20000)
+
+    def relearn(self):
+        w = self.current.cooler
+        q = QMessageBox.question(None, "LoopMedic",
+                                 f"Forget what LoopMedic has learned about your {w}'s normal speed and learn it again?\n\n"
+                                 f"Use this after you change the {w} speed on purpose. Learning takes about 2 weeks, and early warnings "
+                                 f"pause until then. Protection (power-off when the {w} stops or the CPU overheats) is not affected.")
+        if q == QMessageBox.Yes and self.write_control("health-reset.json", "at", datetime.now(), True):
+            self.balloon(f"LoopMedic is learning your {w}'s normal speed again (about 2 weeks).")
+
+    def mail_test(self):
+        if self.write_control("mail-test.json", "at", datetime.now(), True):
+            self.balloon("Test email on its way - check your inbox (and spam) in a minute.")
 
     def warn(self, text):
         if len(text) > 250:

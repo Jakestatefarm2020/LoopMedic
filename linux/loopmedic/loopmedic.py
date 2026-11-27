@@ -30,20 +30,27 @@ Test switches:
   --simulate-stall N      freeze one check for N extra seconds
   --duration N            stop after N seconds
   --selftest-interval-hours H, --selftest-min-uptime S, --fake-selftest-fail FILE
+  --test-mail             send one test email with mail.json now, and exit (0 = sent)
 """
 import argparse
+import base64
 import glob
+import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
+import smtplib
 import socket
+import ssl
 import stat
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 
 VERSION = "2.2.0"
 GPU_CHIPS = {"amdgpu", "radeon", "nouveau", "nvidia", "i915", "xe"}
@@ -364,6 +371,472 @@ class PowerOff:
 
 
 # ----------------------------------------------------------------- main
+# ----------------------------------------------------------------- early warning: a pump slowing down
+# A pump usually wears out slowly before it stops: its speed creeps down over days or weeks. Every HealthSampleMinutes
+# (20) the readings of that window become one sample: the median pump speed (and CPU temperature) per CPU-load band,
+# so like is compared with like. Samples go to health-samples.jsonl (60 days kept). The first HealthLearnDays (14) of
+# samples set the pump's NORMAL speed, kept in health.json: a fixed reference, so a slowly wearing pump can't drag its
+# own "normal" down with it. After that the last HealthRecentDays (3) are compared with it. HealthWarnPercent (12)
+# slower = a WARNING ONLY (log, tray notification, email if set up) - never a power-off, never DEGRADED. Clearly
+# FASTER than normal = the speed setting was changed: forget the old normal and learn again. The tray's
+# "Relearn normal pump speed" (control/health-reset.json) does the same on request.
+class CpuLoad:
+    """CPU busy % from /proc/stat, between two calls."""
+
+    def __init__(self, proc):
+        self.path = os.path.join(proc, "stat")
+        self.last = None
+
+    def read(self):
+        try:
+            with open(self.path) as f:
+                v = [int(x) for x in f.readline().split()[1:9]]
+        except (OSError, ValueError, IndexError):
+            return None
+        idle, total = v[3] + v[4], sum(v)
+        prev, self.last = self.last, (idle, total)
+        if not prev or total <= prev[1]:
+            return None
+        return 100.0 * (1 - (idle - prev[0]) / (total - prev[1]))
+
+
+def median(v):
+    s = sorted(v)
+    n = len(s)
+    if not n:
+        return None
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+class Health:
+    def __init__(self, data_dir, control_dir, what, log, sample_min, learn_days, recent_days, warn_pct, min_readings, notify=None):
+        self.samples_path = os.path.join(data_dir, "health-samples.jsonl")
+        self.state_path = os.path.join(data_dir, "health.json")
+        self.control_dir, self.what, self.log, self.notify = control_dir, what, log, notify
+        self.sample_s = max(5.0, sample_min * 60)
+        self.learn_days, self.recent_days = learn_days, recent_days
+        self.warn = max(0.03, warn_pct / 100)
+        self.min_readings = max(1, int(min_readings))
+        self.window_start = time.monotonic()
+        self.rpms, self.temps = {}, {}
+        self.samples = []
+        st = read_json(self.state_path) or {}
+        self.learn_from = parse_when(st.get("learnFrom")) or datetime.min
+        self.last_reset = parse_when(st.get("lastResetRequest")) or datetime.min
+        self.warned_at = parse_when(st.get("warnedAt"))
+        self.warned_drop = float(st.get("warnedDrop") or 0)
+        self.warning = st.get("warning") if self.warned_at else None
+        self.normal_until = parse_when(st.get("normalUntil"))
+        self.normal = {k: float(v) for k, v in (st.get("normal") or {}).items() if isinstance(v, (int, float))}
+        self._load()
+
+    @staticmethod
+    def band(load):
+        if load is None:
+            return "all"
+        return "light" if load < 25 else "medium" if load < 60 else "heavy"
+
+    def add(self, rpm, temp, load):
+        b = self.band(load)
+        self.rpms.setdefault(b, []).append(rpm)
+        if temp is not None:
+            self.temps.setdefault(b, []).append(temp)
+
+    def tick(self, now, mono):
+        reset = read_control_date(self.control_dir, "health-reset.json", "at")
+        if reset and reset > self.last_reset and reset <= now + timedelta(minutes=5):
+            self.last_reset = reset
+            self._relearn(now, f"Relearn requested from the tray: forgetting the old normal {self.what} speed and learning it again "
+                               f"(about {self.learn_days:g} days).")
+        if mono - self.window_start < self.sample_s:
+            return
+        self.window_start = mono
+        bands = {}
+        for b, v in self.rpms.items():
+            if len(v) >= self.min_readings:
+                t = median(self.temps.get(b, []))
+                bands[b] = [round(median(v), 1), None if t is None else round(t, 1), len(v)]
+        self.rpms, self.temps = {}, {}
+        if not bands:
+            return
+        s = {"at": to_iso(now), "bands": bands}
+        self.samples.append((now, bands))
+        try:
+            with open(self.samples_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(s) + "\n")
+        except OSError:
+            pass
+        self.analyze(now)
+
+    def analyze(self, now):
+        usable = [s for s in self.samples if s[0] >= self.learn_from]
+        if not self.normal:
+            if not usable:
+                return
+            first = min(s[0] for s in usable)
+            if (now - first).total_seconds() < self.learn_days * 86400:
+                return
+            self.normal_until = first + timedelta(days=self.learn_days)
+            for b in {b for s in usable for b in s[1]}:
+                v = [s[1][b][0] for s in usable if s[0] < self.normal_until and b in s[1]]
+                if len(v) >= 36:
+                    self.normal[b] = median(v)
+            if not self.normal:
+                return
+            parts = [f"{v:,.0f} rpm" + ("" if b == "all" else f" at {b} CPU load") for b, v in self.normal.items()]
+            self.log(f"Learned the normal {self.what} speed: {', '.join(parts)}. Early warnings are on from now.")
+            self._save()
+        cut = max(now - timedelta(days=self.recent_days), self.normal_until or datetime.min)
+        worst, worst_band, w_base, w_recent, fastest = 0.0, None, 0.0, 0.0, 0.0
+        for b, base in self.normal.items():
+            recent = [s[1][b][0] for s in usable if s[0] >= cut and b in s[1]]
+            if len(recent) < 18:
+                continue
+            r = median(recent)
+            drop = 1 - r / base
+            if drop > worst:
+                worst, worst_band, w_base, w_recent = drop, b, base, r
+            fastest = max(fastest, -drop)
+        cap = self.what[:1].upper() + self.what[1:]
+        if fastest >= self.warn and worst < self.warn:
+            self._relearn(now, f"{cap} runs {fastest * 100:.0f}% faster than its learned normal - its speed setting was probably changed. "
+                               f"Learning the new normal (about {self.learn_days:g} days).")
+            return
+        if worst_band and worst >= self.warn:
+            if not self.warned_at or (now - self.warned_at).total_seconds() >= 7 * 86400 or worst >= self.warned_drop + 0.05:
+                self.warned_at, self.warned_drop = now, worst
+                self.warning = (f"Your {self.what} has run {worst * 100:.0f}% slower than its normal over the last {self.recent_days:g} days "
+                                f"({w_recent:,.0f} rpm vs {w_base:,.0f} rpm{'' if worst_band == 'all' else ' at ' + worst_band + ' CPU load'}). "
+                                f"{cap}s often slow down as they wear out - check it soon. LoopMedic is still protecting this PC. "
+                                f"If you lowered the {self.what} speed on purpose, use the tray menu > Relearn normal {self.what} speed.")
+                self.log("EARLY WARNING: " + self.warning, 4)
+                self._save()
+                if self.notify:
+                    self.notify("warn", self.warning)
+        elif self.warned_at and worst < self.warn / 2:
+            self.log(f"Early warning cleared: the {self.what} is back to its normal speed.")
+            self.warned_at, self.warned_drop, self.warning = None, 0.0, None
+            self._save()
+            if self.notify:
+                self.notify("clear", f"Your {self.what} is back to its normal speed.")
+
+    def status(self):
+        return {"id": to_iso(self.warned_at), "text": self.warning} if self.warning and self.warned_at else None
+
+    def _relearn(self, now, why):
+        self.log(why)
+        self.learn_from, self.normal, self.normal_until = now, {}, None
+        self.samples = []
+        try:
+            open(self.samples_path, "w").close()
+        except OSError:
+            pass
+        self.warned_at, self.warned_drop, self.warning = None, 0.0, None
+        self._save()
+
+    def _load(self):
+        try:
+            with open(self.samples_path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return
+        oldest = datetime.now() - timedelta(days=60)
+        dropped = 0
+        for line in lines:
+            try:
+                d = json.loads(line)
+                at = parse_when(d.get("at"))
+                bands = {k: [float(x) if x is not None else None for x in v] for k, v in d["bands"].items() if isinstance(v, list) and len(v) >= 3}
+            except (ValueError, TypeError, KeyError, AttributeError):
+                dropped += 1
+                continue
+            if not at or at < oldest or at < self.learn_from or not bands:
+                dropped += 1
+                continue
+            self.samples.append((at, bands))
+        if dropped:
+            try:
+                with open(self.samples_path, "w", encoding="utf-8") as f:
+                    f.writelines(json.dumps({"at": to_iso(at), "bands": b}) + "\n" for at, b in self.samples)
+            except OSError:
+                pass
+
+    def _save(self):
+        write_json_durable(self.state_path, {
+            "learnFrom": to_iso(self.learn_from) if self.learn_from != datetime.min else None,
+            "lastResetRequest": to_iso(self.last_reset) if self.last_reset != datetime.min else None,
+            "warnedAt": to_iso(self.warned_at) if self.warned_at else None, "warnedDrop": self.warned_drop, "warning": self.warning,
+            "normal": {k: round(v, 1) for k, v in self.normal.items()},
+            "normalUntil": to_iso(self.normal_until) if self.normal_until else None})
+
+
+# ----------------------------------------------------------------- email alerts (optional, your own mail server)
+# /etc/loopmedic/mail.json (root-only): off until "Enabled": true. inotify tells us when it changes (no polling),
+# plus a cheap date check once a minute in case a notice was missed. A typed password is scrambled straight away with
+# a random key in /var/lib/loopmedic/mail.key (root-only) - so it never sits in the file as plain text. A broken
+# file is logged and the previous settings kept. Emails go out from a background thread with short timeouts: a slow
+# or dead mail server can never delay a trip or a power-off.
+def _keystream(key, nonce, n):
+    out = b""
+    i = 0
+    while len(out) < n:
+        out += hashlib.sha256(key + nonce + i.to_bytes(4, "big")).digest()
+        i += 1
+    return out[:n]
+
+
+class Inotify:
+    """Change notices for one folder (Linux only; None elsewhere)."""
+
+    def __init__(self, folder):
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        self.fd = libc.inotify_init1(os.O_NONBLOCK | 0o2000000)   # IN_NONBLOCK | IN_CLOEXEC
+        if self.fd < 0:
+            raise OSError("inotify_init1 failed")
+        # IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE
+        if libc.inotify_add_watch(self.fd, folder.encode(), 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200) < 0:
+            os.close(self.fd)
+            raise OSError("inotify_add_watch failed")
+
+    def changed(self, name):
+        hit = False
+        while True:
+            try:
+                buf = os.read(self.fd, 4096)
+            except BlockingIOError:
+                return hit
+            except OSError:
+                return hit
+            if not buf:
+                return hit
+            i = 0
+            while i + 16 <= len(buf):
+                ln = int.from_bytes(buf[i + 12:i + 16], sys.byteorder)
+                nm = buf[i + 16:i + 16 + ln].split(b"\0", 1)[0].decode(errors="replace")
+                if nm == name or nm.startswith(name + "."):
+                    hit = True
+                i += 16 + ln
+
+
+class Mail:
+    def __init__(self, path, key_path, log, check_s=60.0):
+        self.path, self.key_path, self.log, self.check_s = path, key_path, log, check_s
+        self.cur, self.sig = None, ""
+        self.changed_at = None
+        self.last_check = time.monotonic()
+        self.mtime = None
+        self.queue, self.lock, self.wake = [], threading.Lock(), threading.Event()
+        self.sent = []
+        self.watch = None
+        self._load()
+        try:
+            self.watch = Inotify(os.path.dirname(os.path.abspath(path)))
+        except Exception:  # noqa: BLE001 - not Linux, or no inotify: the once-a-minute check covers it
+            self.watch = None
+
+    def start(self):
+        threading.Thread(target=self._sender, daemon=True, name="mail").start()
+        return self
+
+    @property
+    def on(self):
+        return self.cur is not None
+
+    def poll(self, mono):
+        if self.watch and self.watch.changed(os.path.basename(self.path)):
+            self.changed_at = mono
+        if self.changed_at is not None and mono - self.changed_at >= 2:   # let the editor finish saving
+            self.changed_at = None
+            self._load()
+        elif mono - self.last_check >= self.check_s:
+            self.last_check = mono
+            if self._mtime() != self.mtime:
+                self._load()
+
+    def send(self, subject, body, important=False):
+        if not self.cur:
+            return
+        with self.lock:
+            self.queue.append({"subject": f"LoopMedic ({socket.gethostname()}): {subject}", "body": body, "important": important,
+                               "attempt": 0, "not_before": 0.0})
+        self.wake.set()
+
+    def test_body(self):
+        return (f"This is a test email from LoopMedic on {socket.gethostname()}.\n\nEmail alerts work. You'll get an email when LoopMedic "
+                "is about to power this PC off, when it's back on after that, when a warning starts or clears, and if the monthly self-test fails.")
+
+    def test_now(self):
+        if not self.cur:
+            print("Email alerts are off or mail.json has a problem - see the last lines of the LoopMedic log.")
+            return 2
+        try:
+            self._send_now(self.cur, f"LoopMedic ({socket.gethostname()}): test email", self.test_body())
+            print(f"Test email sent to {self.cur['to']}.")
+            return 0
+        except Exception as e:  # noqa: BLE001
+            print(f"Couldn't send: {e}")
+            return 1
+
+    # --- internals
+    def _mtime(self):
+        try:
+            return os.stat(self.path).st_mtime_ns
+        except OSError:
+            return None
+
+    def _key(self):
+        try:
+            with open(self.key_path, "rb") as f:
+                k = f.read()
+            if len(k) == 32:
+                return k
+        except OSError:
+            pass
+        k = os.urandom(32)
+        fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(k)
+        return k
+
+    def protect(self, plain):
+        key, nonce = self._key(), os.urandom(16)
+        data = plain.encode()
+        ct = bytes(x ^ y for x, y in zip(data, _keystream(key, nonce, len(data))))
+        mac = hmac.new(key, nonce + ct, hashlib.sha256).digest()
+        return base64.b64encode(nonce + ct + mac).decode()
+
+    def _unprotect(self, blob):
+        raw = base64.b64decode(blob)
+        nonce, ct, mac = raw[:16], raw[16:-32], raw[-32:]
+        key = self._key()
+        if not hmac.compare_digest(mac, hmac.new(key, nonce + ct, hashlib.sha256).digest()):
+            raise ValueError("key mismatch")
+        return bytes(x ^ y for x, y in zip(ct, _keystream(key, nonce, len(ct)))).decode()
+
+    def _set(self, s, line):
+        sig = "" if s is None else json.dumps(s, sort_keys=True)
+        if sig == self.sig:
+            self.cur = s
+            return
+        was = self.cur is not None
+        self.cur, self.sig = s, sig
+        if s is not None or was:
+            self.log(f"Mail: {'settings updated. ' if was and s else ''}{line}")
+
+    def _load(self):
+        self.mtime = self._mtime()
+        if self.mtime is None:
+            self._set(None, "mail.json not found - email alerts off.")
+            return
+        try:
+            if os.path.getsize(self.path) > 64 * 1024:
+                raise ValueError("file too big")
+            with open(self.path, encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("not a JSON object")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"Mail: mail.json has a mistake ({e}) - keeping the previous mail settings. Fix the file and save it again.")
+            return
+        plain = str(d.get("Password") or "")
+        if plain:
+            try:
+                d["Password"] = ""
+                d["PasswordProtected"] = self.protect(plain)
+                tmp = self.path + ".tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(d, f, indent=2)
+                    f.write("\n")
+                os.replace(tmp, self.path)
+                self.mtime = self._mtime()
+                self.log("Mail: password scrambled in mail.json (the key is root-only).")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"Mail: couldn't scramble the password in mail.json ({e}).")
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+        if d.get("Enabled") is not True:
+            self._set(None, 'Email alerts off (mail.json: "Enabled": false).')
+            return
+        try:
+            port = int(d.get("Port") or 587)
+        except (TypeError, ValueError):
+            port = -1
+        s = {"server": str(d.get("Server") or "").strip(), "port": port, "security": str(d.get("Security") or "starttls").strip().lower(),
+             "user": str(d.get("Username") or "").strip(), "from": str(d.get("From") or "").strip(), "to": str(d.get("To") or "").strip(),
+             "password": ""}
+        s["from"] = s["from"] or s["user"]
+        if d.get("PasswordProtected"):
+            try:
+                s["password"] = self._unprotect(str(d["PasswordProtected"]))
+            except Exception:  # noqa: BLE001
+                self.log('Mail: the saved password can\'t be read - type it into mail.json again ("Password": "...").')
+        problem = None
+        if not s["server"]:
+            problem = '"Server" is empty'
+        elif not 1 <= port <= 65535:
+            problem = '"Port" must be 1-65535'
+        elif not s["to"] or not s["from"]:
+            problem = '"To" and "From" (or "Username") are needed'
+        elif s["security"] == "ssl" or port == 465:
+            problem = 'port 465 / "ssl" isn\'t supported - use port 587 with "Security": "starttls"'
+        elif s["security"] not in ("starttls", "none"):
+            problem = '"Security" must be "starttls" or "none"'
+        if problem:
+            self.log(f"Mail: mail.json - {problem}. Keeping the previous mail settings.")
+            return
+        self._set(s, f"Email alerts on: to {s['to']} via {s['server']}:{port} ({s['security']}).")
+
+    @staticmethod
+    def _send_now(s, subject, body):
+        msg = EmailMessage()
+        msg["Subject"], msg["From"], msg["To"] = subject, s["from"], ", ".join(x.strip() for x in re.split(r"[,;]", s["to"]) if x.strip())
+        msg.set_content(body)
+        with smtplib.SMTP(s["server"], s["port"], timeout=20) as c:
+            if s["security"] == "starttls":
+                c.starttls(context=ssl.create_default_context())
+            if s["user"]:
+                c.login(s["user"], s["password"])
+            c.send_message(msg)
+
+    def _sender(self):
+        while True:
+            self.wake.wait(10)
+            self.wake.clear()
+            while True:
+                now = time.monotonic()
+                with self.lock:
+                    m = next((x for x in self.queue if x["not_before"] <= now), None)
+                    if m:
+                        self.queue.remove(m)
+                if not m:
+                    break
+                s = self.cur
+                if not s:
+                    continue
+                self.sent = [t for t in self.sent if now - t < 3600]
+                if not m["important"] and len(self.sent) >= 6:
+                    self.log(f'Mail: more than 6 emails this hour - not sending "{m["subject"]}".')
+                    continue
+                try:
+                    self._send_now(s, m["subject"], m["body"])
+                    self.sent.append(now)
+                    self.log(f'Mail: sent "{m["subject"]}".')
+                except Exception as e:  # noqa: BLE001
+                    m["attempt"] += 1
+                    if m["attempt"] < (5 if m["important"] else 2):
+                        m["not_before"] = now + 30 * 2 ** (m["attempt"] - 1)
+                        with self.lock:
+                            self.queue.append(m)
+                        self.log(f"Mail: not sent ({e}) - trying again in {int(m['not_before'] - now)} s.")
+                    else:
+                        self.log(f'Mail: not sent ({e}) - giving up on "{m["subject"]}".')
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="LoopMedic for Linux - powers off if the AIO pump stops or the CPU overheats.")
     ap.add_argument("--config", default="/etc/loopmedic/config.json")
@@ -383,6 +856,9 @@ def main(argv=None):
     ap.add_argument("--selftest-interval-hours", type=float, default=24 * 30)
     ap.add_argument("--selftest-min-uptime", type=float, default=600)
     ap.add_argument("--fake-selftest-fail", default="", help="tests: if this file exists, the self-test fails")
+    ap.add_argument("--mail", default="/etc/loopmedic/mail.json", help="email alert settings (optional)")
+    ap.add_argument("--mail-check-seconds", type=float, default=60, help="date check for mail.json changes inotify missed")
+    ap.add_argument("--test-mail", action="store_true", help="send one test email now and exit")
     a = ap.parse_args(argv)
 
     log = Log(a.log)
@@ -395,6 +871,9 @@ def main(argv=None):
     last_off_path = os.path.join(a.data_dir, "last-poweroff.json")
     selftest_path = os.path.join(a.data_dir, "selftest.json")
     test_mode = a.duration > 0 or a.once
+    mail_key = os.path.join(a.data_dir, "mail.key")
+    if a.test_mail:
+        return Mail(a.mail, mail_key, log).test_now()
 
     def hold_degraded(msgs, code):
         """Nothing can be watched: keep telling the tray why (it would otherwise just say Offline)."""
@@ -440,6 +919,7 @@ def main(argv=None):
     hot_delay_s = max(2, int(num("HotShutdownDelaySeconds", 5)))
     rearm_s = num("RearmSeconds", 120)
     heartbeat_min = num("HeartbeatMinutes", 60)
+    health_warmup = num("HealthWarmupSeconds", 300)    # no health samples for 5 min after start / wake
     if pump_stopped >= pump_min:
         pump_stopped = max(0.0, pump_min - 1)
     # Air cooler mode: the CPU fan takes the pump's place. Same rules, only the wording changes.
@@ -524,10 +1004,16 @@ def main(argv=None):
             log(f"  {f.label:<20} {f.read()} rpm   [{f.id}]")
         return 0
 
+    # ---- email alerts (optional: mail.json)
+    mail = Mail(a.mail, mail_key, log, a.mail_check_seconds).start()
+
     # ---- why did the PC turn off last time?
     last_off = read_json(last_off_path)
     if last_off and last_off.get("armed") and not last_off.get("reported"):
         log(f"Last power-off by LoopMedic: {last_off.get('at')} - {last_off.get('reason')}", 4)
+        mail.send("PC back on after a power-off", f"This PC is running again after LoopMedic powered it off.\n\n"
+                  f"Last power-off by LoopMedic: {last_off.get('at')} - {last_off.get('reason')}\n\n"
+                  "Find out why before running anything heavy. The log is /var/log/loopmedic/loopmedic.log.", True)
         last_off["reported"] = True
         write_json_durable(last_off_path, last_off)
     elif last_off and not last_off.get("armed"):
@@ -565,6 +1051,16 @@ def main(argv=None):
         return max(a.selftest_min_uptime, left)
 
     next_selftest = started + selftest_due(selftest)
+    # early warning (a pump slowing down over days): only with a real pump/fan sensor, never in simulations
+    health = None
+    if pump and not simulating:
+        health = Health(a.data_dir, a.control_dir, pw, log, num("HealthSampleMinutes", 20), num("HealthLearnDays", 14),
+                        num("HealthRecentDays", 3), num("HealthWarnPercent", 12), num("HealthMinReadings", 60),
+                        lambda kind, text: mail.send(f"Early warning: {pw} slowing down" if kind == "warn" else f"{pw} speed back to normal", text))
+        health.analyze(datetime.now())
+    cpu_load = CpuLoad(a.proc)
+    last_wake = started
+    last_mail_test = datetime.now()
 
     def run_selftest():
         """The power-off path, minus the power-off: systemd can create our transient timer, and we're root."""
@@ -595,6 +1091,9 @@ def main(argv=None):
             # written now (the systemd timer does the power-off, not us): read after the restart
             write_json_durable(last_off_path, {"at": now_iso(), "reason": reason, "kind": kind, "armed": True, "reported": False})
         power.arm(delay, dry)
+        if kind != "test":   # sent in the background - never holds up the countdown
+            mail.send(("DRY RUN - " if dry else "") + "POWERING OFF", f"LoopMedic tripped: {reason}.\n\nThe PC powers off in {delay} s "
+                      f"unless someone cancels it at the PC ({datetime.now():%Y-%m-%d %H:%M:%S}).", True)
 
     def jump_log(text, now):
         nonlocal jump_hour, jump_count
@@ -629,6 +1128,7 @@ def main(argv=None):
             gap = mono - last_check
             last_check = mono
             if gap >= 10:
+                last_wake = mono   # after a sleep or a long stall, readings settle before health sampling resumes
                 if stall_hour != now.hour:
                     stall_hour, stall_count = now.hour, 0
                 stall_count += 1
@@ -721,6 +1221,8 @@ def main(argv=None):
                 last_cancel = c
                 power.cancel()
                 log(f"Power-off CANCELLED from the tray pop-up ({trip['reason']}). Re-arming in {rearm_s:g}s.", 5 if trip["kind"] != "test" else None)
+                if trip["kind"] != "test":
+                    mail.send("Power-off cancelled", f"Someone at the PC cancelled the power-off ({trip['reason']}). LoopMedic re-arms shortly.", True)
                 if trip["kind"] != "test" and not a.dry_run:
                     try:
                         os.remove(last_off_path)
@@ -785,8 +1287,11 @@ def main(argv=None):
             if dtext != last_degraded:
                 if dtext:
                     log(f"DEGRADED: {dtext}", 4)
+                    mail.send("Warning - " + degraded[0].split(":")[0], "LoopMedic warning on this PC:\n\n" + "\n".join(degraded) +
+                              "\n\nNothing has been powered off. You'll get another email when this clears.")
                 elif last_degraded:
                     log("Protection back to normal.", 5)
+                    mail.send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.")
                 last_degraded = dtext
 
             # --- checks
@@ -836,8 +1341,29 @@ def main(argv=None):
                     next_selftest = mono + a.selftest_interval_hours * 3600
                 else:
                     log(f"Monthly self-test FAILED: {detail}.", 3)
+                    mail.send("Self-test FAILED", f"The monthly LoopMedic self-test failed: {detail}.\n\nLoopMedic may not be able to power this PC off. "
+                              "Reinstall it.", True)
                     selftest_problem = f"Monthly self-test FAILED: {detail}. LoopMedic may not be able to power off. Reinstall."
                     next_selftest = mono + min(24 * 3600, a.selftest_interval_hours * 3600)
+
+            # --- email: mail.json changed? (cheap: inotify + a date check once a minute); tray test request
+            mail.poll(mono)
+            mt = read_control_date(a.control_dir, "mail-test.json", "at")
+            if mt and mt > last_mail_test and abs((now - mt).total_seconds()) < 300:
+                last_mail_test = mt
+                if mail.on:
+                    log("Test email requested from the tray.")
+                    mail.send("test email", mail.test_body(), True)
+                else:
+                    log("Test email requested, but email alerts are off (mail.json).")
+
+            # --- early warning: health samples (warning only, never a trip)
+            if health:
+                load = cpu_load.read()
+                settled = elapsed >= health_warmup and mono - last_wake >= health_warmup
+                if settled and not paused and not trip and pump_ever_ok and pump_bad_since is None and rpm is not None and rpm > pump_stopped:
+                    health.add(rpm, temp, load)
+                health.tick(now, mono)
 
             # --- status for the tray app
             state = "ARMED"
@@ -875,6 +1401,9 @@ def main(argv=None):
                 "tripDeadline": to_iso(now + timedelta(seconds=trip["deadline_mono"] - mono)) if trip else None,
                 "lastPowerOff": lo,
                 "selfTest": {"at": selftest.get("at"), "ok": bool(selftest.get("ok"))} if selftest else None,
+                "mail": mail.on,
+                # early warning: the tray shows it once as a notification (never in the panel)
+                "healthWarning": health.status() if health else None,
                 "fans": [{"name": f.label, "rpm": rpm if (pump and f.id == pump.id) else f.read(), "pump": bool(pump and f.id == pump.id)} for f in fans],
             })
             sd_notify("WATCHDOG=1")

@@ -30,6 +30,21 @@ import loopmedic as pg  # noqa: E402
 
 OPT = "/opt/loopmedic"
 ETC_CFG = "/etc/loopmedic/config.json"
+ETC_MAIL = "/etc/loopmedic/mail.json"
+MAIL_TEMPLATE = """{
+  "_read_me": "LoopMedic email alerts (optional). Fill in your mail server, set Enabled to true and save (sudo nano /etc/loopmedic/mail.json). LoopMedic picks up the change within seconds - no restart. Type the password as plain text: LoopMedic scrambles it as soon as it sees it (the key is root-only). Then use the tray menu > Send a test email.",
+  "_security": "starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.",
+  "_tip": "Gmail, Outlook and most big providers need an app password here, not your normal password. To = one address, or several separated by commas.",
+  "Enabled": false,
+  "Server": "smtp.example.com",
+  "Port": 587,
+  "Security": "starttls",
+  "Username": "",
+  "Password": "",
+  "From": "",
+  "To": ""
+}
+"""
 CONTROL = "/var/lib/loopmedic/control"
 UNIT = "/etc/systemd/system/loopmedic.service"
 MODPROBE_CONF = "/etc/modprobe.d/loopmedic-nct6683.conf"
@@ -395,7 +410,69 @@ def remove_pumpguard(keep_records=True):
     say("Removed the old PumpGuard install (LoopMedic replaces it).", "green")
 
 
-def install(cfg_path, with_tray):
+def ensure_mail(mail_text=None):
+    """mail.json (root-only): the settings from setup, else a switched-off template once - updates never touch it."""
+    if mail_text:
+        sudo_write(ETC_MAIL, mail_text, "600")
+    elif not os.path.exists(ETC_MAIL):
+        sudo_write(ETC_MAIL, MAIL_TEMPLATE, "600")
+
+
+def setup_mail():
+    """Setup step: ask, test, and return the mail.json text to install (or None to keep / write the template)."""
+    old = None
+    try:
+        r = subprocess.run(["sudo", "cat", ETC_MAIL], capture_output=True, text=True) if os.path.exists(ETC_MAIL) else None
+        old = json.loads(r.stdout) if r and r.returncode == 0 else None
+    except (ValueError, OSError):
+        old = None
+    say("LoopMedic can email you when it powers this PC off, when a warning starts or clears, and if its self-test fails.")
+    say("This needs a mail server you can send through (SMTP), e.g. your email provider's, with an app password.")
+    q = (f"Email alerts are already on (to {old.get('To')}). Change them?" if isinstance(old, dict) and old.get("Enabled") is True
+         else f"Set up a mail server for alerts? You can do this later by editing {ETC_MAIL}")
+    if not yes_no(q):
+        say(f"Skipped. To set it up later: sudo nano {ETC_MAIL} and set Enabled to true.")
+        return None
+    import getpass as gp
+    while True:
+        server = input("Mail server (e.g. smtp.gmail.com): ").strip()
+        p = input("Port (Enter = 587): ").strip()
+        port = int(p) if p.isdigit() else 587
+        if port == 465:
+            say("Port 465 (SSL) is not supported - most providers also offer 587.", "yellow")
+            port = 587
+        security = "none" if port == 25 and not yes_no("Use encryption (STARTTLS)? Say n only for a local relay") else "starttls"
+        user = input("User name (usually your email address): ").strip()
+        password = gp.getpass("Password or app password (hidden): ")
+        to = input(f"Send alerts to (Enter = {user}): ").strip() or user
+        mail = {"_read_me": "LoopMedic email alerts. Edit with: sudo nano /etc/loopmedic/mail.json - LoopMedic picks up changes within seconds. "
+                            "To change the password, type it into Password as plain text - LoopMedic scrambles it straight away.",
+                "_security": "starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.",
+                "Enabled": True, "Server": server, "Port": port, "Security": security, "Username": user, "Password": password,
+                "From": user, "To": to}
+        text = json.dumps(mail, indent=2) + "\n"
+        say("Sending a test email...")
+        tmp = tempfile.mkdtemp(prefix="loopmedic-mail-test-")
+        try:
+            path = os.path.join(tmp, "mail.json")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            r = subprocess.run([sys.executable, os.path.join(HERE, "loopmedic.py"), "--test-mail", "--mail", path, "--data-dir", tmp, "--log", ""],
+                               capture_output=True, text=True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        for line in (r.stdout + r.stderr).strip().splitlines()[-3:]:
+            say("  " + line)
+        if r.returncode == 0:
+            say("Check your inbox (and spam folder). Email alerts will be on after install.", "green")
+            return text
+        if not yes_no("That did not work. Enter the settings again?"):
+            say(f"Kept anyway - fix them later with: sudo nano {ETC_MAIL} (the reason is above).", "yellow")
+            return text
+
+
+def install(cfg_path, with_tray, mail_text=None):
     user = getpass.getuser()
     group = grp.getgrgid(os.getgid()).gr_name
     stop_tray()
@@ -404,6 +481,7 @@ def install(cfg_path, with_tray):
     sudo(["install", "-d", "-m", "755", OPT, os.path.dirname(ETC_CFG), "/var/lib/loopmedic"])
     sudo(["install", "-m", "644", os.path.join(HERE, "loopmedic.py"), os.path.join(HERE, "loopmedic_tray.py"), LIMITS, OPT])
     sudo(["install", "-m", "644", cfg_path, ETC_CFG])
+    ensure_mail(mail_text)
     # control/ is the one folder the tray (you) may write: pause/test/cancel requests. The root
     # service only reads dates out of it, refuses symlinks and anything over 4 KB.
     sudo(["install", "-d", "-m", "755", "-o", user, "-g", group, CONTROL])
@@ -444,6 +522,7 @@ def update_as_root(user, group):
     sudo(["install", "-m", "644", os.path.join(HERE, "loopmedic.py"), os.path.join(HERE, "loopmedic_tray.py"), LIMITS, OPT])
     sudo(["install", "-m", "644", tmp.name, ETC_CFG])
     os.remove(tmp.name)
+    ensure_mail()
     sudo(["install", "-d", "-m", "755", "-o", user, "-g", group, CONTROL])
     sudo_write(UNIT, unit_text())
     sudo(["systemctl", "daemon-reload"])
@@ -503,10 +582,10 @@ def main():
         say("This needs systemd (systemctl). Setup stopped.", "red")
         return 1
 
-    step("1/5  Tray icon support")
+    step("1/6  Tray icon support")
     with_tray = ensure_tray_deps()
 
-    step("2/5  Motherboard sensors")
+    step("2/6  Motherboard sensors")
     say(f"Motherboard: {pg.board_name() or 'unknown'}")
     cpu = pg.cpu_model()
     say(f"CPU:         {cpu or 'unknown'}")
@@ -540,7 +619,7 @@ def main():
         except (OSError, ValueError):
             pass
 
-    step("3/5  Your CPU cooler")
+    step("3/6  Your CPU cooler")
     if keep:
         say(f"Keeping: {pump.label if pump else 'temperature only'}")
     else:
@@ -556,7 +635,7 @@ def main():
         pump = pick_pump(fans, air)
     what = "CPU fan" if air else "pump"
 
-    step("4/5  CPU temperature limit")
+    step("4/6  CPU temperature limit")
     hot_s = None
     if not temp:
         say("No CPU temperature sensor found (k10temp/coretemp) - the temperature backup can't work.", "yellow")
@@ -588,7 +667,10 @@ def main():
         json.dump(cfg, f, indent=2)
     say(f"Saved: {what} = {pump.label + ' [' + pump.id + ']' if pump else 'none (temperature only)'}, CPU limit = {'%g C' % max_temp if max_temp > 0 else 'none'}", "green")
 
-    step("5/5  Safe test, then install")
+    step("5/6  Email alerts (optional)")
+    mail_text = setup_mail()
+
+    step("6/6  Safe test, then install")
     if not dry_run_test(cfg_path, pump is not None, what):
         say("TEST FAILED: LoopMedic did not react. Not installing. Send the lines above to whoever gave you this.", "red")
         return 1
@@ -598,7 +680,7 @@ def main():
     if not yes_no("Install LoopMedic (service + tray icon) so it runs at every boot?"):
         say("Not installed. Run ./install.sh again whenever you are ready.")
         return 0
-    install(cfg_path, with_tray)
+    install(cfg_path, with_tray, mail_text)
     say()
     say("Done. LoopMedic is running.", "green")
     if with_tray:
