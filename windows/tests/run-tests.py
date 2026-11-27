@@ -144,7 +144,7 @@ def t_spike_ignored():
         time.sleep(0.5); seen.append(r.status().get("pumpRpm"))
     r.wait(); log = r.log(); p = []
     expect(4600 not in seen, f"one-reading spike must not reach status (saw {seen})", p)
-    expect("came straight back - ignored" in log, "ignored jump logged", p)
+    expect("1 one-reading pump glitch ignored" in log, "glitch counted in the hourly line", p)
     return p
 
 

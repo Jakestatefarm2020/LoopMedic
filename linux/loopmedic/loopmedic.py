@@ -539,7 +539,7 @@ def main(argv=None):
     cooldown_until = 0.0
     max_temp = min_rpm = max_rpm = None
     accepted = pending = None        # the pump reading the watchdog believes / a jump waiting for confirmation
-    jump_hour, jump_count = -1, 0
+    jump_hour, jump_count, glitches = -1, 0, 0
     stall_hour, stall_count, stall_sim_done = -1, 0, False
     last_check = time.monotonic()
     day = datetime.now().date()
@@ -648,8 +648,9 @@ def main(argv=None):
                     pending, rpm = raw, accepted
             else:
                 if pending is not None:
+                    # One wild reading that came straight back: tach noise. Counted in the hourly line, not logged one by one.
                     if not simulating:
-                        jump_log(f"{fmt(accepted)} -> {fmt(pending)} -> {fmt(raw)} rpm (one reading, came straight back - ignored) (CPU {fmt(temp)} C)", now)
+                        glitches += 1
                     pending = None
                 elif not simulating and accepted > 0 and abs(raw - accepted) / accepted > 0.15:
                     jump_log(f"{fmt(accepted)} -> {fmt(raw)} rpm (CPU {fmt(temp)} C)", now)
@@ -682,8 +683,9 @@ def main(argv=None):
 
             end_now = a.duration > 0 and elapsed >= a.duration
             if end_now or (mono - last_heartbeat) / 60 >= heartbeat_min:
-                log(f"OK  pump {fmt(rpm)} rpm, CPU {fmt(temp)} C  (since last line: CPU max {fmt(max_temp)} C, pump min {fmt(min_rpm)} / max {fmt(max_rpm)} rpm)")
-                last_heartbeat, max_temp, min_rpm, max_rpm = mono, None, None, None
+                g = f", {glitches} one-reading pump glitch{'' if glitches == 1 else 'es'} ignored" if glitches else ""
+                log(f"OK  pump {fmt(rpm)} rpm, CPU {fmt(temp)} C  (since last line: CPU max {fmt(max_temp)} C, pump min {fmt(min_rpm)} / max {fmt(max_rpm)} rpm{g})")
+                last_heartbeat, max_temp, min_rpm, max_rpm, glitches = mono, None, None, None, 0
             if end_now:
                 log("Test duration reached - exiting.")
                 return 0

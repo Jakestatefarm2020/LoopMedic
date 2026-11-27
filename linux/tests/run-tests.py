@@ -140,7 +140,7 @@ def t_spike_ignored():
     r.set_pump(2400); s2 = r.next_status()      # back to normal on the next check
     r.wait(); p = []
     expect(s1.get("pumpRpm") == 2400 and s2.get("pumpRpm") == 2400, f"one-reading spike must not reach status ({s1.get('pumpRpm')}, {s2.get('pumpRpm')})", p)
-    expect("came straight back - ignored" in r.log(), "ignored jump logged", p)
+    expect("1 one-reading pump glitch ignored" in r.log(), "glitch counted in the hourly line", p)
     return p
 
 

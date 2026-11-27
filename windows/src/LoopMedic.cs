@@ -670,7 +670,7 @@ namespace LoopMedic
             DateTime lastCheckWall = Clock.Now;
             double? maxTemp = null, minRpm = null, maxRpm = null;
             double? accepted = null, pending = null;          // pump reading the watchdog believes / a jump waiting for confirmation
-            int jumpHour = -1, jumpCount = 0, stallHour = -1, stallCount = 0;
+            int jumpHour = -1, jumpCount = 0, stallHour = -1, stallCount = 0, glitches = 0;
             DateTime day = Clock.Now.Date;
             double? dayMaxTemp = null, dayMinPump = null;
             Trip trip = null;
@@ -735,7 +735,8 @@ namespace LoopMedic
                 {
                     if (pending.HasValue)
                     {
-                        if (!simulating) JumpLog(ref jumpHour, ref jumpCount, wall, F(accepted) + " -> " + F(pending) + " -> " + F(raw) + " rpm (one reading, came straight back - ignored) (CPU " + F(temp) + " C)");
+                        // One wild reading that came straight back: tach noise. Counted in the hourly line, not logged one by one.
+                        if (!simulating) glitches++;
                         pending = null;
                     }
                     else if (!simulating && accepted.Value > 0 && Math.Abs(raw.Value - accepted.Value) / accepted.Value > 0.15)
@@ -757,8 +758,9 @@ namespace LoopMedic
                 bool endNow = o.Duration > 0 && elapsed >= o.Duration;
                 if (endNow || (now - lastHeartbeat) / 60 >= heartbeatMinutes)
                 {
-                    Log.Write("OK  pump " + F(rpm) + " rpm, CPU " + F(temp) + " C  (since last line: CPU max " + F(maxTemp) + " C, pump min " + F(minRpm) + " / max " + F(maxRpm) + " rpm)");
-                    lastHeartbeat = now; maxTemp = null; minRpm = null; maxRpm = null;
+                    Log.Write("OK  pump " + F(rpm) + " rpm, CPU " + F(temp) + " C  (since last line: CPU max " + F(maxTemp) + " C, pump min " + F(minRpm) + " / max " + F(maxRpm) + " rpm" +
+                        (glitches > 0 ? ", " + glitches + " one-reading pump glitch" + (glitches == 1 ? "" : "es") + " ignored" : "") + ")");
+                    lastHeartbeat = now; maxTemp = null; minRpm = null; maxRpm = null; glitches = 0;
                 }
                 if (endNow) { Log.Write("Test duration reached - exiting."); src.Close(); return 0; }
 
