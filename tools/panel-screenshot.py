@@ -1,6 +1,7 @@
 r"""Take docs/panel.png: the tray panel running on MADE-UP sensor values (no real hardware details).
 
-    python tools/panel-screenshot.py        (after windows/build.ps1; Windows only; nothing powers off)
+    python tools/panel-screenshot.py                        (after windows/build.ps1; Windows only; nothing powers off)
+    python tools/panel-screenshot.py --theme Ice --air --out shot.png    (other themes / air cooler mode)
 
 Runs windows\bin\LoopMedic.exe as a watchdog on fake sensors in a temp folder, opens a second tray panel for
 that folder, feeds it ~70 s of gently varying readings so the graphs fill in, then captures the panel window.
@@ -13,6 +14,13 @@ from PIL import Image, ImageDraw
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "windows", "bin")
 OUT = os.path.join(ROOT, "docs", "panel.png")
+THEME, AIR = None, False
+args = sys.argv[1:]
+while args:
+    a = args.pop(0)
+    if a == "--theme": THEME = args.pop(0)
+    elif a == "--air": AIR = True
+    elif a == "--out": OUT = os.path.abspath(args.pop(0))
 PUMP, TEMP = "/lpc/demo/0/fan/0", "/cpu/demo/0/temperature/0"
 FANS = [("Fan #2", 1180), ("Fan #3", 940), ("Fan #4", 940), ("Fan #5", 0)]
 
@@ -21,12 +29,14 @@ os.makedirs(os.path.join(work, "control"))
 shutil.copy(os.path.join(ROOT, "windows", "cpu-limits.json"), work)
 cfg = json.load(open(os.path.join(ROOT, "windows", "package", "config.template.json"), encoding="utf-8"))
 cfg.update({"PumpSensorId": PUMP, "CpuTempSensorId": TEMP, "CpuName": "AMD Ryzen 7 7800X3D", "CpuMaxTempC": 84})
+if AIR:
+    cfg.update({"CoolerType": "air", "PumpMinRpm": 250})
 json.dump(cfg, open(os.path.join(work, "config.json"), "w"))
 fake = os.path.join(work, "fake-sensors.json")
 
 
 def push(t):
-    pump = 2400 + 25 * math.sin(t / 9) + random.uniform(-12, 12)
+    pump = (900 if AIR else 2400) + 25 * math.sin(t / 9) + random.uniform(-12, 12)
     temp = 46 + 6 * math.sin(t / 17) + random.uniform(-0.6, 0.6)
     sensors = [{"id": PUMP, "name": "Fan #1", "type": "Fan", "hw": "SuperIO", "value": round(pump, 1)},
                {"id": TEMP, "name": "Core (Tctl/Tdie)", "type": "Temperature", "hw": "Cpu", "value": round(temp, 1)}]
@@ -60,7 +70,7 @@ push(0)
 worker = subprocess.Popen([os.path.join(BIN, "LoopMedic.exe"), "--worker", "--root", work, "--fake-sensors", fake,
                            "--duration", "150"])   # healthy made-up values can never trip; no --dry-run so the badge reads ARMED
 time.sleep(3)
-tray = subprocess.Popen([os.path.join(BIN, "LoopMedicTray.exe"), "--dir", work, "--open"])
+tray = subprocess.Popen([os.path.join(BIN, "LoopMedicTray.exe"), "--dir", work, "--open"] + (["--theme", THEME] if THEME else []))
 try:
     t0 = time.time()
     while time.time() - t0 < 70:

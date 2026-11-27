@@ -32,7 +32,7 @@ import urllib.request
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetricsF, QGuiApplication,
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetricsF, QGuiApplication,
                            QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
@@ -137,20 +137,56 @@ class Bridge(QObject):
 
 
 # ------------------------------------------------------------------ theme
+# Themes (tray right-click > Themes). Green = "all good" (graphs, pump bar, ARMED), Blue = the second accent
+# (fan bars, TEST), Amber / Red = warnings and alarms. Every theme keeps those last two clearly apart from its
+# accents, so a warning never blends in.
+THEMES = {
+    # name: (Bg, Card, Hot, Line, Text, Dim, Green, Blue, Amber, Red, Link, Grey, Off)
+    "Stealth": ((28, 28, 33), (38, 38, 45), (58, 58, 68), (55, 55, 64), (236, 236, 240), (150, 150, 160),
+                (76, 194, 107), (76, 154, 255), (240, 168, 48), (229, 72, 77), (122, 176, 255), (138, 143, 152), (90, 90, 98)),
+    "Atomic": ((13, 21, 43), (22, 35, 68), (34, 52, 96), (40, 58, 100), (236, 242, 255), (146, 163, 200),
+               (56, 189, 255), (255, 214, 10), (255, 138, 40), (255, 70, 85), (255, 214, 10), (140, 150, 170), (85, 95, 115)),
+    "Dark Side": ((18, 10, 24), (33, 19, 44), (50, 30, 66), (62, 38, 80), (246, 236, 252), (176, 152, 190),
+                  (84, 150, 255), (255, 77, 196), (255, 170, 50), (255, 59, 59), (255, 128, 214), (150, 140, 160), (95, 85, 105)),
+    "Ice": ((247, 250, 255), (230, 239, 250), (214, 228, 246), (204, 217, 235), (16, 48, 96), (88, 112, 148),
+            (22, 112, 224), (70, 160, 240), (196, 118, 0), (206, 32, 48), (0, 96, 200), (118, 128, 144), (160, 168, 180)),
+}
+THEME_FILE = os.path.join(os.path.expanduser("~"), ".config", "loopmedic", "theme.txt")   # per user
+
+
 class T:
-    Bg = QColor(28, 28, 33)
-    Card = QColor(38, 38, 45)
-    Line = QColor(55, 55, 64)
-    Text = QColor(236, 236, 240)
-    Dim = QColor(150, 150, 160)
-    Green = QColor(76, 194, 107)
-    Amber = QColor(240, 168, 48)
-    Red = QColor(229, 72, 77)
-    Blue = QColor(76, 154, 255)
-    Link = QColor(122, 176, 255)   # gentle link blue (version = update check)
-    Grey = QColor(138, 143, 152)
-    Off = QColor(90, 90, 98)
-    Hot = QColor(58, 58, 68)
+    name = "Stealth"
+
+    @staticmethod
+    def apply(name):
+        if name not in THEMES:
+            name = "Stealth"
+        (T.Bg, T.Card, T.Hot, T.Line, T.Text, T.Dim, T.Green, T.Blue, T.Amber, T.Red, T.Link, T.Grey,
+         T.Off) = (QColor(*c) for c in THEMES[name])
+        T.name = name
+
+    @staticmethod
+    def load():
+        try:
+            with open(THEME_FILE, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return "Stealth"
+
+    @staticmethod
+    def save():
+        try:
+            os.makedirs(os.path.dirname(THEME_FILE), exist_ok=True)
+            with open(THEME_FILE, "w", encoding="utf-8") as f:
+                f.write(T.name)
+        except OSError:
+            pass
+
+    @staticmethod
+    def on(bg):
+        """Text that reads on top of a coloured button: black on light colours, white on dark ones."""
+        c = QColor(bg)
+        return QColor(0, 0, 0) if c.red() * 0.299 + c.green() * 0.587 + c.blue() * 0.114 > 150 else QColor(255, 255, 255)
 
     @staticmethod
     def for_state(s):
@@ -163,6 +199,7 @@ class T:
                 "STARTING": "STARTING", "PAUSED": "PAUSED"}.get(s, "OFFLINE")
 
 
+T.apply(T.load())
 FAMILY = None
 
 
@@ -619,7 +656,7 @@ class Panel(QWidget, Clickable):
         hot = self.hover == text
         g.fillPath(rounded(r, 6), T.Green if accent else (T.Hot if hot else T.Card))
         g.setFont(f)
-        g.setPen(QColor(0, 0, 0) if accent else T.Text)
+        g.setPen(T.on(T.Green) if accent else T.Text)
         g.drawText(r, Qt.AlignCenter, text)
 
 
@@ -704,9 +741,9 @@ class TripPopup(QWidget, Clickable):
         y += 22
         bh = 38
         if self.is_test:
-            self.button(g, QRectF(W - pad - 160, y, 160, bh), "Close", self.close_test, fB, T.Blue, Qt.white)
+            self.button(g, QRectF(W - pad - 160, y, 160, bh), "Close", self.close_test, fB, T.Blue, T.on(T.Blue))
         else:
-            self.button(g, QRectF(pad, y, 170, bh), "Shut down now", self.shutdown_now, fB, T.Red, Qt.white)
+            self.button(g, QRectF(pad, y, 170, bh), "Shut down now", self.shutdown_now, fB, T.Red, T.on(T.Red))
             self.button(g, QRectF(W - pad - 190, y, 190, bh), "Cancel shutdown", self.cancel, fB, T.Card, T.Text)
         y += bh + 10
         g.setFont(fS)
@@ -779,6 +816,14 @@ class TrayApp:
         self.act_exit.triggered.connect(QApplication.quit)
         for x in (self.act_open, self.act_pause, self.act_test, self.act_log):
             menu.addAction(x)
+        themes = menu.addMenu("Themes")
+        self.theme_group = QActionGroup(themes)
+        for name in THEMES:
+            act = QAction(name, self.theme_group)
+            act.setCheckable(True)
+            act.setChecked(name == T.name)
+            act.triggered.connect(lambda _=False, n=name: self.set_theme(n))
+            themes.addAction(act)
         menu.addSeparator()
         menu.addAction(self.act_exit)
         self.menu = menu
@@ -917,6 +962,16 @@ class TrayApp:
         lst.append(v)
         if len(lst) > 300:
             del lst[0]
+
+    def set_theme(self, name):
+        T.apply(name)
+        T.save()
+        self.icons.clear()
+        self.icon_state = None
+        self.tray.setIcon(self.icon_for(self.current.state))
+        self.icon_state = self.current.state
+        if self.panel:
+            self.panel.update()
 
     def icon_for(self, s):
         if s not in self.icons:
@@ -1111,7 +1166,10 @@ def main():
     ap.add_argument("--shot-panel")
     ap.add_argument("--shot-trip")
     ap.add_argument("--history", type=int, default=0, help="(screenshots) seconds of history to sample first")
+    ap.add_argument("--theme", help="a theme for this run only (screenshots; not saved)")
     a = ap.parse_args()
+    if a.theme:
+        T.apply(a.theme)
 
     app = QApplication(sys.argv)
     app.setApplicationName("LoopMedic")

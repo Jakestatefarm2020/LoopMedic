@@ -40,7 +40,10 @@ namespace LoopMedicTray
             bool created;
             string dir = AppDomain.CurrentDomain.BaseDirectory;
             for (int i = 0; i < args.Length - 1; i++)
+            {
                 if (args[i] == "--dir") dir = args[i + 1];
+                if (args[i] == "--theme") Theme.Apply(args[i + 1]);   // screenshots: a theme for this run only (not saved)
+            }
             // one tray per data folder (a test tray with --dir can run next to the real one)
             string mutexName = "Local\\LoopMedicTray" + (args.Contains("--dir") ? "-" + (Path.GetFullPath(dir).ToLowerInvariant().GetHashCode() & 0x7fffffff) : "");
             using (var mutex = new Mutex(true, mutexName, out created))
@@ -157,20 +160,60 @@ namespace LoopMedicTray
     }
 
     // ------------------------------------------------------------------ look
+    // Themes (tray right-click > Themes). Green = "all good" (graphs, pump bar, ARMED), Blue = the second accent
+    // (fan bars, TEST), Amber / Red = warnings and alarms. Every theme keeps those last two clearly apart from
+    // its accents, so a warning never blends in.
     static class Theme
     {
-        public static readonly Color Bg = Color.FromArgb(28, 28, 33);
-        public static readonly Color Card = Color.FromArgb(38, 38, 45);
-        public static readonly Color Line = Color.FromArgb(55, 55, 64);
-        public static readonly Color Text = Color.FromArgb(236, 236, 240);
-        public static readonly Color Dim = Color.FromArgb(150, 150, 160);
-        public static readonly Color Green = Color.FromArgb(76, 194, 107);
-        public static readonly Color Amber = Color.FromArgb(240, 168, 48);
-        public static readonly Color Red = Color.FromArgb(229, 72, 77);
-        public static readonly Color Blue = Color.FromArgb(76, 154, 255);
-        public static readonly Color Link = Color.FromArgb(122, 176, 255);   // gentle link blue (version = update check)
-        public static readonly Color Grey = Color.FromArgb(138, 143, 152);
-        public static readonly Color Off = Color.FromArgb(90, 90, 98);
+        public static readonly string[] Names = { "Stealth", "Atomic", "Dark Side", "Ice" };
+        public static string Name = "Stealth";
+        public static bool Dark = true;
+        public static Color Bg, Card, CardHot, Line, Text, Dim, Green, Amber, Red, Blue, Link, Grey, Off;
+
+        static Theme() { Apply(Load()); }
+
+        static Color C(int r, int g, int b) { return Color.FromArgb(r, g, b); }
+
+        public static void Apply(string name)
+        {
+            switch (name)
+            {
+                case "Atomic":       // deep navy, electric blue + yellow
+                    Bg = C(13, 21, 43); Card = C(22, 35, 68); CardHot = C(34, 52, 96); Line = C(40, 58, 100);
+                    Text = C(236, 242, 255); Dim = C(146, 163, 200);
+                    Green = C(56, 189, 255); Blue = C(255, 214, 10); Amber = C(255, 138, 40); Red = C(255, 70, 85);
+                    Link = C(255, 214, 10); Grey = C(140, 150, 170); Off = C(85, 95, 115); Dark = true;
+                    break;
+                case "Dark Side":    // near-black purple, blue + pink/magenta
+                    Bg = C(18, 10, 24); Card = C(33, 19, 44); CardHot = C(50, 30, 66); Line = C(62, 38, 80);
+                    Text = C(246, 236, 252); Dim = C(176, 152, 190);
+                    Green = C(84, 150, 255); Blue = C(255, 77, 196); Amber = C(255, 170, 50); Red = C(255, 59, 59);
+                    Link = C(255, 128, 214); Grey = C(150, 140, 160); Off = C(95, 85, 105); Dark = true;
+                    break;
+                case "Ice":          // white, blue graphs and text
+                    Bg = C(247, 250, 255); Card = C(230, 239, 250); CardHot = C(214, 228, 246); Line = C(204, 217, 235);
+                    Text = C(16, 48, 96); Dim = C(88, 112, 148);
+                    Green = C(22, 112, 224); Blue = C(70, 160, 240); Amber = C(196, 118, 0); Red = C(206, 32, 48);
+                    Link = C(0, 96, 200); Grey = C(118, 128, 144); Off = C(160, 168, 180); Dark = false;
+                    break;
+                default:             // Stealth: the original dark look
+                    name = "Stealth";
+                    Bg = C(28, 28, 33); Card = C(38, 38, 45); CardHot = C(58, 58, 68); Line = C(55, 55, 64);
+                    Text = C(236, 236, 240); Dim = C(150, 150, 160);
+                    Green = C(76, 194, 107); Blue = C(76, 154, 255); Amber = C(240, 168, 48); Red = C(229, 72, 77);
+                    Link = C(122, 176, 255); Grey = C(138, 143, 152); Off = C(90, 90, 98); Dark = true;
+                    break;
+            }
+            Name = name;
+        }
+
+        // Text that reads on top of a coloured button: black on light colours, white on dark ones.
+        public static Color On(Color bg) { return bg.R * 0.299 + bg.G * 0.587 + bg.B * 0.114 > 150 ? Color.Black : Color.White; }
+
+        // The choice is per user (each Windows account can pick its own).
+        static string SettingsFile { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LoopMedic", "theme.txt"); } }
+        static string Load() { try { return File.Exists(SettingsFile) ? File.ReadAllText(SettingsFile).Trim() : "Stealth"; } catch { return "Stealth"; } }
+        public static void Save() { try { Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)); File.WriteAllText(SettingsFile, Name); } catch { } }
 
         public static Color ForState(string s)
         {
@@ -208,7 +251,7 @@ namespace LoopMedicTray
         public static void RoundCorners(Form f)
         {
             try { int pref = 2; DwmSetWindowAttribute(f.Handle, 33, ref pref, 4); } catch { }   // Win11 rounded corners
-            try { int dark = 1; DwmSetWindowAttribute(f.Handle, 20, ref dark, 4); } catch { }
+            try { int dark = Dark ? 1 : 0; DwmSetWindowAttribute(f.Handle, 20, ref dark, 4); } catch { }
         }
 
         public static GraphicsPath Rounded(RectangleF r, float rad)
@@ -250,7 +293,7 @@ namespace LoopMedicTray
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly Dictionary<string, Icon> icons = new Dictionary<string, Icon>();
         readonly ContextMenuStrip menu = new ContextMenuStrip();
-        readonly ToolStripMenuItem miPause, miTest;
+        readonly ToolStripMenuItem miPause, miTest, miThemes;
         public readonly List<double> PumpHist = new List<double>(), CpuHist = new List<double>();
         public Status Current = new Status();
         DateTime lastAt = DateTime.MinValue, lastHeartbeat = DateTime.MinValue;
@@ -272,9 +315,20 @@ namespace LoopMedicTray
             menu.Items.Add(miPause);
             menu.Items.Add(miTest);
             menu.Items.Add("Open log", null, delegate { OpenLog(); });
+            miThemes = new ToolStripMenuItem("Themes");
+            foreach (string n in Theme.Names)
+            {
+                string name = n;
+                miThemes.DropDownItems.Add(new ToolStripMenuItem(name, null, delegate { SetTheme(name); }));
+            }
+            menu.Items.Add(miThemes);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit tray icon (protection keeps running)", null, delegate { ExitApp(); });
-            menu.Opening += delegate { miPause.Text = Current.State == "PAUSED" ? "Resume protection" : "Pause 30 min"; };
+            menu.Opening += delegate
+            {
+                miPause.Text = Current.State == "PAUSED" ? "Resume protection" : "Pause 30 min";
+                foreach (ToolStripMenuItem t in miThemes.DropDownItems) t.Checked = t.Text == Theme.Name;
+            };
 
             ni.ContextMenuStrip = menu;
             ni.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) TogglePanel(); };
@@ -381,6 +435,17 @@ namespace LoopMedicTray
         {
             if (text.Length > 250) text = text.Substring(0, 247) + "...";
             Notice("LoopMedic - protection reduced", text, false, ToolTipIcon.Warning);
+        }
+
+        void SetTheme(string name)
+        {
+            Theme.Apply(name);
+            Theme.Save();
+            foreach (var ic in icons.Values) ic.Dispose();
+            icons.Clear();
+            iconState = null;
+            UpdateIcon();
+            if (panel != null) { panel.BackColor = Theme.Bg; Theme.RoundCorners(panel); panel.Invalidate(); }
         }
 
         void UpdateIcon()
@@ -830,10 +895,10 @@ namespace LoopMedicTray
             var b = new Btn { Rect = r, Text = text, Click = click, Accent = accent };
             buttons.Add(b);
             bool hot = hover != null && hover.Text == text;
-            Color bg = accent ? Theme.Green : (hot ? Color.FromArgb(58, 58, 68) : Theme.Card);
+            Color bg = accent ? Theme.Green : (hot ? Theme.CardHot : Theme.Card);
             using (var bb = new SolidBrush(bg)) using (var p = Theme.Rounded(r, 6 * S)) g.FillPath(bb, p);
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            using (var tb = new SolidBrush(accent ? Color.Black : Theme.Text)) g.DrawString(text, f, tb, r, sf);
+            using (var tb = new SolidBrush(accent ? Theme.On(Theme.Green) : Theme.Text)) g.DrawString(text, f, tb, r, sf);
         }
     }
 
@@ -1003,7 +1068,7 @@ namespace LoopMedicTray
 
         static Button Flat(string text, Color bg, Rectangle r)
         {
-            var b = new Button { Text = text, FlatStyle = FlatStyle.Flat, BackColor = bg, ForeColor = Color.White, Bounds = r, Cursor = Cursors.Hand };
+            var b = new Button { Text = text, FlatStyle = FlatStyle.Flat, BackColor = bg, ForeColor = bg == Theme.Card ? Theme.Text : Theme.On(bg), Bounds = r, Cursor = Cursors.Hand };
             b.FlatAppearance.BorderSize = 0;
             return b;
         }
@@ -1186,11 +1251,11 @@ namespace LoopMedicTray
                 float bh = 38 * S;
                 if (isTest)
                 {
-                    AddButton(g, new RectangleF(W - pad - 160 * S, y, 160 * S, bh), "Close", delegate { acted = true; app.CancelShutdown(true); Close(); }, fB, Theme.Blue, Color.White);
+                    AddButton(g, new RectangleF(W - pad - 160 * S, y, 160 * S, bh), "Close", delegate { acted = true; app.CancelShutdown(true); Close(); }, fB, Theme.Blue, Theme.On(Theme.Blue));
                 }
                 else
                 {
-                    AddButton(g, new RectangleF(pad, y, 170 * S, bh), "Shut down now", delegate { acted = true; app.ShutdownNow(); }, fB, Theme.Red, Color.White);
+                    AddButton(g, new RectangleF(pad, y, 170 * S, bh), "Shut down now", delegate { acted = true; app.ShutdownNow(); }, fB, Theme.Red, Theme.On(Theme.Red));
                     AddButton(g, new RectangleF(W - pad - 190 * S, y, 190 * S, bh), "Cancel shutdown", delegate { acted = true; app.CancelShutdown(false); Close(); }, fB, Theme.Card, Theme.Text);
                 }
                 y += bh + 10 * S;
