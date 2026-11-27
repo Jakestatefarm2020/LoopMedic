@@ -442,6 +442,9 @@ def main(argv=None):
     heartbeat_min = num("HeartbeatMinutes", 60)
     if pump_stopped >= pump_min:
         pump_stopped = max(0.0, pump_min - 1)
+    # Air cooler mode: the CPU fan takes the pump's place. Same rules, only the wording changes.
+    air = str(cfg.get("CoolerType") or "").strip().lower() == "air"
+    Pw, pw = ("CPU fan", "CPU fan") if air else ("Pump", "pump")
     fallback_c, limits = load_cpu_limits(a.cpu_limits)
 
     # ---- sensors
@@ -452,10 +455,10 @@ def main(argv=None):
     if pump_id:
         pump = next((s for s in sensors if s.id == pump_id), None)
         if not pump:
-            log(f"WARNING: pump sensor '{pump_id}' not found - pump check OFF.")
-            problems.append("Pump sensor not found (BIOS/driver/kernel change?) - pump NOT watched. Re-run setup.")
+            log(f"WARNING: {pw} sensor '{pump_id}' not found - {pw} check OFF.")
+            problems.append(f"{Pw} sensor not found (BIOS/driver/kernel change?) - {pw} NOT watched. Re-run setup.")
     else:
-        log("No pump sensor in config.json (no pump speed wire on a motherboard header) - temperature-only protection.")
+        log(f"No {pw} sensor in config.json (no speed wire on a motherboard header) - temperature-only protection.")
 
     cpu_temp = None
     temp_id = str(cfg.get("CpuTempSensorId") or "")
@@ -490,7 +493,7 @@ def main(argv=None):
     simulating = a.simulate_pump >= 0
 
     if not pump and not temp_check and not simulating:
-        log("ERROR: no pump sensor and no CPU temperature; nothing to guard.")
+        log(f"ERROR: no {pw} sensor and no CPU temperature; nothing to guard.")
         return hold_degraded(problems + ["Nothing can be watched - NOT PROTECTING."], 2)
 
     # ---- start-up self-check
@@ -508,7 +511,7 @@ def main(argv=None):
         return f"{s.label} [{s.id}]" if s else "none"
 
     mode = "DRY RUN" if a.dry_run else "ARMED"
-    start_line = (f"LoopMedic {VERSION} (Linux) started ({mode}). Pump: {desc(pump)}, trips if stopped (<= {pump_stopped:g} rpm) for "
+    start_line = (f"LoopMedic {VERSION} (Linux) started ({mode}{', air cooler' if air else ''}). {Pw}: {desc(pump)}, trips if stopped (<= {pump_stopped:g} rpm) for "
                   f"{pump_fail_s:g}s ({pump_fail_cool_s:g}s while CPU < {cool_cpu_c:g} C), slow warning below {pump_min:g} rpm. "
                   f"CPU: {desc(cpu_temp)}, max {cpu_max:g} C for {cpu_hot_s:g}s. Fans: {len(fans)}. "
                   f"Power-off after {delay_s}s ({hot_delay_s}s if the CPU is already hot).")
@@ -516,7 +519,7 @@ def main(argv=None):
 
     if a.once:
         r = a.simulate_pump if simulating else (pump.read() if pump else None)
-        log(f"Pump rpm: {r}   CPU temp: {cpu_temp.read() if cpu_temp else None} C")
+        log(f"{Pw} rpm: {r}   CPU temp: {cpu_temp.read() if cpu_temp else None} C")
         for f in fans:
             log(f"  {f.label:<20} {f.read()} rpm   [{f.id}]")
         return 0
@@ -599,9 +602,9 @@ def main(argv=None):
             jump_hour, jump_count = now.hour, 0
         jump_count += 1
         if jump_count <= 20:
-            log("Pump jump: " + text)
+            log(f"{Pw} jump: " + text)
         elif jump_count == 21:
-            log("Pump jump: more than 20 this hour - not logging the rest until the next hour.")
+            log(f"{Pw} jump: more than 20 this hour - not logging the rest until the next hour.")
 
     def fmt(v):
         return "-" if v is None else f"{v:g}"
@@ -683,8 +686,8 @@ def main(argv=None):
 
             end_now = a.duration > 0 and elapsed >= a.duration
             if end_now or (mono - last_heartbeat) / 60 >= heartbeat_min:
-                g = f", {glitches} one-reading pump glitch{'' if glitches == 1 else 'es'} ignored" if glitches else ""
-                log(f"OK  pump {fmt(rpm)} rpm, CPU {fmt(temp)} C  (since last line: CPU max {fmt(max_temp)} C, pump min {fmt(min_rpm)} / max {fmt(max_rpm)} rpm{g})")
+                g = f", {glitches} one-reading {pw} glitch{'' if glitches == 1 else 'es'} ignored" if glitches else ""
+                log(f"OK  {pw} {fmt(rpm)} rpm, CPU {fmt(temp)} C  (since last line: CPU max {fmt(max_temp)} C, {pw} min {fmt(min_rpm)} / max {fmt(max_rpm)} rpm{g})")
                 last_heartbeat, max_temp, min_rpm, max_rpm, glitches = mono, None, None, None, 0
             if end_now:
                 log("Test duration reached - exiting.")
@@ -711,7 +714,7 @@ def main(argv=None):
             t = read_control_date(a.control_dir, "test.json", "requested")
             if t and t > last_test and (now - t).total_seconds() < 60 and not trip:
                 last_test = t
-                protect("test", "TEST - simulated pump failure (nothing will power off)", delay_s)
+                protect("test", f"TEST - simulated {pw} failure (nothing will power off)", delay_s)
 
             c = read_control_date(a.control_dir, "cancel.json", "at")
             if trip and c and c > last_cancel and c >= trip["started"] - timedelta(seconds=1):
@@ -761,18 +764,18 @@ def main(argv=None):
             if selftest_problem:
                 degraded.append(selftest_problem)
             if pump_null_since and mono - pump_null_since >= 30:
-                degraded.append("Pump sensor not responding - pump NOT watched right now.")
+                degraded.append(f"{Pw} sensor not responding - {pw} NOT watched right now.")
             if temp_null_since and mono - temp_null_since >= 30:
                 degraded.append("CPU temperature not responding.")
             in_grace = elapsed < grace_s
             if (pump or simulating) and not pump_ever_ok and not in_grace and rpm is not None:
-                degraded.append(f"Pump has read {rpm:g} rpm since boot - cable moved? Pump trip held; CPU temperature still watched.")
+                degraded.append(f"{Pw} has read {rpm:g} rpm since boot - cable moved? {Pw} trip held; CPU temperature still watched.")
             # Slow but spinning: warn, don't power off (eco modes, or a pump that reports a different pulse
             # count, can read low). The CPU temperature trip still covers a pump that's really failing.
             if pump_ever_ok and rpm is not None and pump_stopped < rpm < pump_min:
                 pump_slow_since = pump_slow_since or mono
                 if mono - pump_slow_since >= pump_fail_s:
-                    degraded.append(f"Pump slower than usual: {rpm:g} rpm (warning below {pump_min:g}). Not powering off for this alone; "
+                    degraded.append(f"{Pw} slower than usual: {rpm:g} rpm (warning below {pump_min:g}). Not powering off for this alone; "
                                     "the CPU temperature trip is still armed.")
                     if not pump_slow_reported:
                         pump_slow_reported = True
@@ -795,16 +798,16 @@ def main(argv=None):
                         window = pump_fail_cool_s if cool else pump_fail_s
                         if pump_bad_since is None:
                             pump_bad_since = mono
-                            log(f"Pump stopped: {rpm:g} rpm - watching" +
+                            log(f"{Pw} stopped: {rpm:g} rpm - watching" +
                                 (f" (CPU cool at {temp:g} C: allowing {pump_fail_cool_s:g}s, e.g. for a firmware update)." if cool else "."), 4)
                         elif mono - pump_bad_since >= window:
                             hot = temp_check and temp is not None and temp >= cpu_max
-                            protect("pump", f"pump at {rpm:g} rpm for {int(mono - pump_bad_since)}s (CPU {fmt(temp)} C)",
+                            protect("pump", f"{pw} at {rpm:g} rpm for {int(mono - pump_bad_since)}s (CPU {fmt(temp)} C)",
                                     hot_delay_s if hot else delay_s)
                             pump_bad_since = hot_since = None
                             cooldown_until = mono + rearm_s
                     elif pump_bad_since is not None:
-                        log(f"Pump recovered: {rpm:g} rpm.")
+                        log(f"{Pw} recovered: {rpm:g} rpm.")
                         pump_bad_since = None
                 else:
                     pump_bad_since = None
@@ -815,7 +818,7 @@ def main(argv=None):
                             hot_since = mono
                             log(f"CPU hot: {temp:g} C - watching.", 4)
                         elif mono - hot_since >= cpu_hot_s:
-                            protect("cpu", f"CPU at {temp:g} C for {int(mono - hot_since)}s (pump {fmt(rpm)} rpm)", delay_s)
+                            protect("cpu", f"CPU at {temp:g} C for {int(mono - hot_since)}s ({pw} {fmt(rpm)} rpm)", delay_s)
                             pump_bad_since = hot_since = None
                             cooldown_until = mono + rearm_s
                     elif hot_since is not None:
@@ -856,6 +859,7 @@ def main(argv=None):
                 "version": VERSION,
                 "state": state,
                 "dryRun": bool(a.dry_run),
+                "coolerType": "air" if air else "aio",
                 "degraded": degraded,
                 "pumpRpm": rpm,
                 "cpuTemp": temp,

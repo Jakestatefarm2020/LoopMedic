@@ -214,6 +214,7 @@ class Status:
         self.at = datetime.min
         self.state = "OFFLINE"
         self.dry_run = False
+        self.air = False        # air cooler mode: the CPU fan is watched instead of a pump
         self.version = ""
         self.degraded = []
         self.pump_rpm = self.cpu_temp = self.pump_min = self.cpu_max = self.pump_stopped = None
@@ -225,6 +226,14 @@ class Status:
         self.cpu_name = ""
         self.fans = []
         self.read_ok = False    # file read and parsed (False = missing, mid-write or garbled)
+
+    @property
+    def cooler_title(self):
+        return "CPU fan" if self.air else "Pump"
+
+    @property
+    def cooler(self):
+        return "CPU fan" if self.air else "pump"
 
     @staticmethod
     def load(path):
@@ -238,6 +247,7 @@ class Status:
         st.at = parse_when(d.get("at")) or datetime.min
         st.state = str(d.get("state") or "OFFLINE")
         st.dry_run = bool(d.get("dryRun"))
+        st.air = d.get("coolerType") == "air"
         st.version = str(d.get("version") or "")
         dg = d.get("degraded") or []
         st.degraded = [str(x) for x in (dg if isinstance(dg, list) else [dg]) if x]
@@ -441,7 +451,7 @@ class Panel(QWidget, Clickable):
                 y += br.height() + 2
             y += 6
 
-        y = self.draw_metric(g, y, pad, W, "Pump", fmt_n(st.pump_rpm) if st.pump_rpm is not None else "—", "rpm",
+        y = self.draw_metric(g, y, pad, W, st.cooler_title, fmt_n(st.pump_rpm) if st.pump_rpm is not None else "—", "rpm",
                         self.pump_color(st), self.app.pump_hist,
                         # headroom of 10% of the speed above and below, so normal one-reading wiggles look small
                         max(50, (st.pump_rpm or 0) * 0.10), fBig, fMid, fSmall)
@@ -452,8 +462,8 @@ class Panel(QWidget, Clickable):
         g.setPen(T.Dim)
         asc = QFontMetricsF(fSmall).ascent()
         if st.pump_stopped is not None:     # v2.2+: trips only on a stopped pump; slow = warning
-            trips = f"Trips: pump stopped (≤ {fmt_n(st.pump_stopped)} rpm)" + (f"  ·  CPU ≥ {st.cpu_max:.0f} °C" if st.cpu_max else "")
-            warns = f"Warns: pump < {fmt_n(st.pump_min or 0)} rpm"
+            trips = f"Trips: {st.cooler} stopped (≤ {fmt_n(st.pump_stopped)} rpm)" + (f"  ·  CPU ≥ {st.cpu_max:.0f} °C" if st.cpu_max else "")
+            warns = f"Warns: {st.cooler} < {fmt_n(st.pump_min or 0)} rpm"
             if st.cpu_temp is not None and st.cpu_max:
                 warns += f"  ·  {max(0, st.cpu_max - st.cpu_temp):.0f}° headroom"
             g.drawText(QPointF(pad, y + asc), trips)
@@ -467,7 +477,7 @@ class Panel(QWidget, Clickable):
             g.drawText(QPointF(pad, y + asc), trips)
             y += 18
         today = "Today: CPU peak " + (f"{st.day_max_temp:.0f} °C" if st.day_max_temp is not None else "—") + \
-                "  ·  pump min " + (f"{fmt_n(st.day_min_pump)} rpm" if st.day_min_pump is not None else "—")
+                f"  ·  {st.cooler} min " + (f"{fmt_n(st.day_min_pump)} rpm" if st.day_min_pump is not None else "—")
         g.drawText(QPointF(pad, y + asc), today)
         y += 18
         if st.selftest_at:
@@ -501,7 +511,7 @@ class Panel(QWidget, Clickable):
         g.setFont(fSmall)
         for f in live:
             g.setPen(T.Green if f["pump"] else T.Text)
-            g.drawText(QPointF(pad, y + asc), f["name"] + ("  · Pump" if f["pump"] else ""))
+            g.drawText(QPointF(pad, y + asc), f["name"] + (f"  · {st.cooler_title}" if f["pump"] else ""))
             r = fmt_n(f["rpm"]) + " rpm"
             g.setPen(T.Text)
             g.drawText(QPointF(W - pad - text_w(fSmall, r), y + asc), r)
@@ -620,8 +630,9 @@ class TripPopup(QWidget, Clickable):
         Clickable.__init__(self)
         self.app = app
         self.is_test = st.trip_kind == "test" or st.state == "TEST"
-        self.title = "TEST: SIMULATED PUMP FAILURE" if self.is_test else (
-            "CPU TEMPERATURE LIMIT REACHED" if st.trip_kind == "cpu" else "PUMP FAILURE DETECTED")
+        what = st.cooler_title.upper()
+        self.title = f"TEST: SIMULATED {what} FAILURE" if self.is_test else (
+            "CPU TEMPERATURE LIMIT REACHED" if st.trip_kind == "cpu" else f"{what} FAILURE DETECTED")
         self.reason = st.trip_reason or ""
         self.deadline = st.trip_deadline or datetime.now() + timedelta(seconds=30)
         self.total = max(1.0, (self.deadline - datetime.now()).total_seconds())
@@ -916,7 +927,7 @@ class TrayApp:
         st = self.current
         tip = f"LoopMedic - {T.label(st.state)}"
         if st.state != "OFFLINE":
-            tip += f"\nPump {fmt_n(st.pump_rpm) + ' rpm' if st.pump_rpm is not None else '—'} · CPU " + \
+            tip += f"\n{st.cooler_title} {fmt_n(st.pump_rpm) + ' rpm' if st.pump_rpm is not None else '—'} · CPU " + \
                    (f"{st.cpu_temp:.1f} °C" if st.cpu_temp is not None else "—")
         self.tray.setToolTip(tip)
         if st.state != self.icon_state:
@@ -995,7 +1006,7 @@ class TrayApp:
         self.popup.raise_()
         self.popup.activateWindow()
         if st.trip_kind != "test" and st.state != "TEST":
-            title = "CPU TEMPERATURE LIMIT REACHED" if st.trip_kind == "cpu" else "PUMP FAILURE DETECTED"
+            title = "CPU TEMPERATURE LIMIT REACHED" if st.trip_kind == "cpu" else f"{st.cooler_title.upper()} FAILURE DETECTED"
             body = f"{st.trip_reason or ''}\nThe PC powers off in about 30 s. Open the LoopMedic pop-up to cancel."
             if shutil.which("notify-send"):
                 subprocess.Popen(["notify-send", "-u", "critical", "-a", "LoopMedic", "-i", "dialog-warning", title, body])

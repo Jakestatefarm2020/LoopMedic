@@ -21,7 +21,7 @@ try {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) { Write-Host 'Please start setup with Install.bat (it asks for admin).' -ForegroundColor Red; Exit-Setup 1 }
 
-    Write-Host 'LoopMedic setup: shuts the PC down if the AIO pump stops or the CPU overheats.' -ForegroundColor White
+    Write-Host 'LoopMedic setup: powers the PC off if the AIO pump (or CPU fan) stops or the CPU overheats.' -ForegroundColor White
     Write-Host 'by Jacob Stiltner' -ForegroundColor DarkGray
 
     # ---------------------------------------------------------------- 1
@@ -80,7 +80,7 @@ try {
     }
 
     # ---------------------------------------------------------------- 3
-    Show-Step '3/5  Finding your pump'
+    Show-Step '3/5  Your CPU cooler'
     Add-Type -Path (Join-Path $here 'lhm\LibreHardwareMonitorLib.dll')
     $c = New-Object LibreHardwareMonitor.Hardware.Computer
     $c.IsCpuEnabled = $true
@@ -107,6 +107,7 @@ try {
     $pump = $null
     $cpuTemp = $null
     $maxTemp = -1
+    $air = $false     # air cooler mode: the CPU fan is watched instead of a pump (same rules)
 
     # Already installed? Offer to keep those settings if they still match this PC.
     $keep = $false
@@ -116,71 +117,113 @@ try {
     if (Test-Path $oldPath) {
         try {
             $old = Get-Content $oldPath -Raw | ConvertFrom-Json
+            $oldAir = [string]$old.CoolerType -eq 'air'
+            $oldWhat = if ($oldAir) { 'CPU fan' } else { 'Pump' }
             $oldPump = if ($old.PumpSensorId) { $fans | Where-Object { $_.Identifier.ToString() -eq $old.PumpSensorId } | Select-Object -First 1 } else { $null }
             $oldTemp = if ($old.CpuTempSensorId) { $temps | Where-Object { $_.Identifier.ToString() -eq $old.CpuTempSensorId } | Select-Object -First 1 } else { $null }
-            $pumpOk = (-not $old.PumpSensorId) -or ($oldPump -and [double]$oldPump.Value -ge 500)
+            $minSpin = if ($oldAir) { 160 } else { 500 }
+            $pumpOk = (-not $old.PumpSensorId) -or ($oldPump -and [double]$oldPump.Value -ge $minSpin)
             $cpuOk = (-not $old.CpuName) -or ($old.CpuName -eq $cpuHw.Name)
             if ($pumpOk -and $cpuOk -and ($oldPump -or [double]$old.CpuMaxTempC -gt 0)) {
                 Write-Host 'LoopMedic is already installed with these settings:' -ForegroundColor White
-                Write-Host ("  Pump: {0}" -f $(if ($oldPump) { "$($oldPump.Name) (reading {0:N0} rpm now)" -f $oldPump.Value } else { 'none (temperature only)' }))
-                Write-Host ("  CPU limit: {0}" -f $(if ([double]$old.CpuMaxTempC -gt 0) { "$($old.CpuMaxTempC) C" } else { 'off' }))
+                Write-Host ("  Cooler: {0}" -f $(if ($oldAir) { 'air cooler' } else { 'AIO / water loop' }))
+                Write-Host ("  {0}: {1}" -f $oldWhat, $(if ($oldPump) { "$($oldPump.Name) (reading {0:N0} rpm now)" -f $oldPump.Value } else { 'none (temperature only)' }))
+                Write-Host ("  CPU limit: {0}" -f $(if ([double]$old.CpuMaxTempC -gt 0) { "$($old.CpuMaxTempC) C" } else { 'automatic (built-in table)' }))
                 if (Read-YesNo 'Keep these settings?') {
-                    $keep = $true; $pump = $oldPump; $cpuTemp = $oldTemp; $maxTemp = [double]$old.CpuMaxTempC
+                    $keep = $true; $pump = $oldPump; $cpuTemp = $oldTemp; $maxTemp = [double]$old.CpuMaxTempC; $air = $oldAir
                     if (-not $cpuTemp) { $maxTemp = 0 }
                 }
             } elseif (-not $cpuOk) {
                 Write-Host "Your CPU changed ($($old.CpuName) -> $($cpuHw.Name)), so let's pick the settings again." -ForegroundColor Yellow
             } else {
-                Write-Host 'Your saved pump sensor is missing or not spinning, so let''s pick it again.' -ForegroundColor Yellow
+                Write-Host "Your saved $($oldWhat.ToLower()) sensor is missing or not spinning, so let's pick it again." -ForegroundColor Yellow
             }
         } catch { }
     }
+
+    if (-not $keep) {
+        Write-Host 'What cools your CPU?' -ForegroundColor White
+        Write-Host '   1. An AIO or custom water loop (it has a pump)'
+        Write-Host '   2. An air cooler (a heatsink with a fan)'
+        while ($true) {
+            $a = (Read-Host 'Number (Enter = 1)').Trim()
+            if ($a -eq '' -or $a -eq '1') { $air = $false; break }
+            if ($a -eq '2') { $air = $true; break }
+        }
+        Write-Host ''
+    }
+    $what = if ($air) { 'CPU fan' } else { 'pump' }
 
     if ($keep) {
         # settings carried over
     } elseif ($fans.Count -eq 0) {
         Write-Host 'No motherboard fan sensors were found, so only the temperature check can be used.' -ForegroundColor Yellow
     } else {
-        # best guess: a header named like a pump, else the only one spinning at pump speeds
         $guess = -1
-        $named = @(for ($i = 0; $i -lt $fans.Count; $i++) { if ($fans[$i].Name -match 'pump|aio' -and [double]$fans[$i].Value -ge 500) { $i } })
-        $inRange = @(for ($i = 0; $i -lt $fans.Count; $i++) { $v = [double]$fans[$i].Value; if ($v -ge 1500 -and $v -le 4500) { $i } })
-        if ($named.Count -eq 1) { $guess = $named[0] } elseif ($inRange.Count -eq 1) { $guess = $inRange[0] }
-        if (-not ($fans | Where-Object { [double]$_.Value -ge 1000 -and [double]$_.Value -le 5000 })) {
-            Write-Host 'None of the motherboard headers is spinning at pump speeds (1,000-5,000 rpm).' -ForegroundColor Yellow
-            Write-Host 'Some AIO coolers only report the pump speed over USB to their own app, with no speed wire'
-            Write-Host 'to the motherboard. If yours is one of them, choose 0: LoopMedic then protects with the'
-            Write-Host 'CPU temperature only (still a real safety net, just a slower one).'
-            Write-Host ''
+        if ($air) {
+            # best guess: a header named like the CPU fan (most boards just say "Fan #1", so often no guess)
+            $named = @(for ($i = 0; $i -lt $fans.Count; $i++) { if ($fans[$i].Name -match 'cpu' -and [double]$fans[$i].Value -gt 150) { $i } })
+            if ($named.Count -eq 1) { $guess = $named[0] }
+        } else {
+            # best guess: a header named like a pump, else the only one spinning at pump speeds
+            $named = @(for ($i = 0; $i -lt $fans.Count; $i++) { if ($fans[$i].Name -match 'pump|aio' -and [double]$fans[$i].Value -ge 500) { $i } })
+            $inRange = @(for ($i = 0; $i -lt $fans.Count; $i++) { $v = [double]$fans[$i].Value; if ($v -ge 1500 -and $v -le 4500) { $i } })
+            if ($named.Count -eq 1) { $guess = $named[0] } elseif ($inRange.Count -eq 1) { $guess = $inRange[0] }
+            if (-not ($fans | Where-Object { [double]$_.Value -ge 1000 -and [double]$_.Value -le 5000 })) {
+                Write-Host 'None of the motherboard headers is spinning at pump speeds (1,000-5,000 rpm).' -ForegroundColor Yellow
+                Write-Host 'Some AIO coolers only report the pump speed over USB to their own app, with no speed wire'
+                Write-Host 'to the motherboard. If yours is one of them, choose 0: LoopMedic then protects with the'
+                Write-Host 'CPU temperature only (still a real safety net, just a slower one).'
+                Write-Host ''
+            }
         }
         Write-Host 'Fan sensors on your motherboard right now:'
         for ($i = 0; $i -lt $fans.Count; $i++) {
             $line = '  {0,2}. {1,-24} {2,7:N0} rpm' -f ($i + 1), $fans[$i].Name, $fans[$i].Value
-            if ($i -eq $guess) { Write-Host $line -NoNewline; Write-Host '   <- looks like the pump' -ForegroundColor Green } else { Write-Host $line }
+            if ($i -eq $guess) { Write-Host $line -NoNewline; Write-Host "   <- looks like the $what" -ForegroundColor Green } else { Write-Host $line }
         }
-        Write-Host '   0. My pump is not on a motherboard header (temperature-only protection)'
+        Write-Host "   0. My $what is not on a motherboard header (temperature-only protection)"
         Write-Host ''
-        Write-Host 'How to spot the pump:' -ForegroundColor White
-        Write-Host ' - Most AIOs have a small 3-pin pump-speed cable plugged into a header labelled'
-        Write-Host '   PUMP, AIO_PUMP, W_PUMP or CPU_FAN on the motherboard.'
-        Write-Host ' - Pumps usually spin at 1,500-4,000 rpm. Entries reading 0 are empty headers.'
-        Write-Host ' - Not sure? Change the pump speed in your cooler app, run Install.bat again,'
-        Write-Host '   and see which number moved (or use Watch-Pump.bat).'
+        Write-Host "How to spot the ${what}:" -ForegroundColor White
+        if ($air) {
+            Write-Host ' - The cooler fan is plugged into the header labelled CPU_FAN (sometimes CPU_OPT for a second fan).'
+            Write-Host ' - CPU fans usually spin at 400-2,000 rpm. Entries reading 0 are empty headers.'
+            Write-Host ' - Not sure? Run Watch-Pump.bat, change the CPU fan speed in the BIOS or your fan app,'
+            Write-Host '   see which number moved, then run Install.bat again.'
+        } else {
+            Write-Host ' - Most AIOs have a small 3-pin pump-speed cable plugged into a header labelled'
+            Write-Host '   PUMP, AIO_PUMP, W_PUMP or CPU_FAN on the motherboard.'
+            Write-Host ' - Pumps usually spin at 1,500-4,000 rpm. Entries reading 0 are empty headers.'
+            Write-Host ' - Not sure? Change the pump speed in your cooler app, run Install.bat again,'
+            Write-Host '   and see which number moved (or use Watch-Pump.bat).'
+        }
         while ($true) {
             $n = -1
-            $prompt = if ($guess -ge 0) { "Which number is your pump? (Enter = $($guess + 1))" } else { 'Which number is your pump?' }
+            $prompt = if ($guess -ge 0) { "Which number is your ${what}? (Enter = $($guess + 1))" } else { "Which number is your ${what}?" }
             $ans = Read-Host $prompt
             if ([string]::IsNullOrWhiteSpace($ans) -and $guess -ge 0) { $ans = [string]($guess + 1) }
             [void][int]::TryParse($ans, [ref]$n)
             if ($n -lt 0 -or $n -gt $fans.Count) { continue }
             if ($n -eq 0) { break }
             $cand = $fans[$n - 1]
-            if ([double]$cand.Value -lt 500) {
-                Write-Host 'That sensor reads under 500 rpm right now - that is not a running pump. Pick the one your pump is on (or 0).' -ForegroundColor Yellow
-                continue
+            if ($air) {
+                if ([double]$cand.Value -le 150) {
+                    # A fan that stops at idle (zero-RPM / fan-stop mode) would look like a dead fan and trip.
+                    Write-Host 'That fan reads 0 rpm right now. If it is your CPU fan, its "zero RPM" / "fan stop" mode is' -ForegroundColor Yellow
+                    Write-Host 'probably on, so it stops when the PC is idle - LoopMedic would see that as a dead fan.' -ForegroundColor Yellow
+                    Write-Host 'Turn fan stop off for the CPU fan (BIOS fan settings or your fan app), then run Install.bat again,' -ForegroundColor Yellow
+                    Write-Host 'or pick another number (0 = temperature only).' -ForegroundColor Yellow
+                    continue
+                }
+                if ([double]$cand.Value -lt 300) { Write-Host 'Note: that fan is running very slowly. Make sure it never stops completely at idle.' -ForegroundColor Yellow }
+            } else {
+                if ([double]$cand.Value -lt 500) {
+                    Write-Host 'That sensor reads under 500 rpm right now - that is not a running pump. Pick the one your pump is on (or 0).' -ForegroundColor Yellow
+                    continue
+                }
+                if ([double]$cand.Value -lt 1000) { Write-Host 'Note: that is slow for a pump. Double-check it is not a case fan.' -ForegroundColor Yellow }
             }
             $pump = $cand
-            if ([double]$cand.Value -lt 1000) { Write-Host 'Note: that is slow for a pump. Double-check it is not a case fan.' -ForegroundColor Yellow }
             break
         }
     }
@@ -249,12 +292,19 @@ try {
     $cfg.PumpSensorId = if ($pump) { $pump.Identifier.ToString() } else { '' }
     $cfg.CpuTempSensorId = if ($cpuTemp) { $cpuTemp.Identifier.ToString() } else { '' }
     $cfg.CpuMaxTempC = $maxTemp
+    $cfg | Add-Member -NotePropertyName CoolerType -NotePropertyValue $(if ($air) { 'air' } else { 'aio' }) -Force
+    if ($air) {
+        # CPU fans idle much slower than pumps: warn below 250 rpm (or 60% of what it reads now, if that's lower),
+        # but always above the 150 rpm "stopped" line. The stopped rule itself is the same as for a pump.
+        $fanNow = if ($pump) { [double]$pump.Value } else { 400 }
+        $cfg.PumpMinRpm = [int][Math]::Max(160, [Math]::Min(250, [Math]::Floor($fanNow * 0.6)))
+    }
     if ($hotSeconds -gt 0) { $cfg | Add-Member -NotePropertyName CpuHotSeconds -NotePropertyValue $hotSeconds -Force }
     # remembered so LoopMedic notices a CPU swap (a new CPU needs its own limit)
     $cfg | Add-Member -NotePropertyName CpuName -NotePropertyValue ([string]$cpuHw.Name) -Force
     $cfg | ConvertTo-Json | Set-Content $cfgPath -Encoding UTF8
     Write-Host ''
-    Write-Host "Saved: pump = $(if ($pump) { "$($pump.Name) [$($cfg.PumpSensorId)]" } else { 'none (temperature only)' }), CPU limit = $(if ($maxTemp -gt 0) { "$maxTemp C" } else { 'none' })" -ForegroundColor Green
+    Write-Host "Saved: $what = $(if ($pump) { "$($pump.Name) [$($cfg.PumpSensorId)]" } else { 'none (temperature only)' }), CPU limit = $(if ($maxTemp -gt 0) { "$maxTemp C" } else { 'none' })" -ForegroundColor Green
 
     # ---------------------------------------------------------------- 5
     Show-Step '5/5  Safe test, then install'
@@ -265,13 +315,13 @@ try {
     Copy-Item $cfgPath, (Join-Path $here 'cpu-limits.json') $testRoot
     try {
         if ($pump) {
-            Write-Host 'Pretending the pump spins, then stops (nothing will power off). This takes about 70 seconds...'
+            Write-Host "Pretending the $what spins, then stops (nothing will power off). This takes about 70 seconds..."
             $out = & $guard --worker --root $testRoot --dry-run --no-eventlog --simulate-pump 0 --simulate-healthy 22 --duration 70 2>&1 | ForEach-Object { "$_" }
             $out | ForEach-Object { Write-Host "  $_" }
             Start-Sleep -Seconds 2    # the power-off helper writes its last line a moment later
             $testLog = Get-Content (Join-Path $testRoot 'loopmedic.log') -Raw -ErrorAction SilentlyContinue
             if ($testLog -match 'DRY RUN - trip' -and $testLog -match 'WOULD POWER OFF NOW') {
-                Write-Host 'TEST PASSED: LoopMedic reacted to a dead pump.' -ForegroundColor Green
+                Write-Host "TEST PASSED: LoopMedic reacted to a dead $what." -ForegroundColor Green
             } else {
                 Write-Host 'TEST FAILED: LoopMedic did not react. Not installing. Send the lines above to whoever gave you this.' -ForegroundColor Red
                 Exit-Setup 1

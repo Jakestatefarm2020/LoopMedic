@@ -66,6 +66,9 @@ namespace LoopMedicTray
         public string State = "OFFLINE";
         public bool ReadOk;          // the file was read and parsed (false = missing, locked mid-save, or garbled)
         public bool DryRun;
+        public bool Air;             // air cooler mode: the CPU fan is watched instead of a pump
+        public string Cooler { get { return Air ? "CPU fan" : "Pump"; } }
+        public string cooler { get { return Air ? "CPU fan" : "pump"; } }
         public double? PumpRpm, CpuTemp, PumpMinRpm, PumpStoppedRpm, CpuMaxTemp, DayMaxTemp, DayMinPump;
         public DateTime? LastPowerOffAt, SelfTestAt;
         public string LastPowerOffReason;
@@ -109,6 +112,7 @@ namespace LoopMedicTray
                 st.At = Date(d, "at") ?? DateTime.MinValue;
                 st.State = Str(d, "state") ?? "OFFLINE";
                 st.DryRun = (Str(d, "dryRun") ?? "").ToLowerInvariant() == "true";
+                st.Air = (Str(d, "coolerType") ?? "") == "air";
                 st.PumpRpm = Num(d, "pumpRpm"); st.CpuTemp = Num(d, "cpuTemp");
                 st.PumpMinRpm = Num(d, "pumpMinRpm"); st.CpuMaxTemp = Num(d, "cpuMaxTemp");
                 st.DayMaxTemp = Num(d, "dayMaxTemp"); st.DayMinPump = Num(d, "dayMinPump");
@@ -387,7 +391,7 @@ namespace LoopMedicTray
             else
             {
                 tip = "LoopMedic " + Theme.Label(s);
-                if (Current.PumpRpm.HasValue) tip += " · Pump " + Current.PumpRpm.Value.ToString("N0") + " rpm";
+                if (Current.PumpRpm.HasValue) tip += " · " + Current.Cooler + " " + Current.PumpRpm.Value.ToString("N0") + " rpm";
                 if (Current.CpuTemp.HasValue) tip += " · CPU " + Current.CpuTemp.Value.ToString("0") + "°C";
             }
             if (tip.Length > 63) tip = tip.Substring(0, 63);
@@ -677,7 +681,7 @@ namespace LoopMedicTray
                 }
 
                 // big rows
-                DrawMetric(g, ref y, pad, W, "Pump", st.PumpRpm.HasValue ? st.PumpRpm.Value.ToString("N0") : "—", "rpm",
+                DrawMetric(g, ref y, pad, W, st.Cooler, st.PumpRpm.HasValue ? st.PumpRpm.Value.ToString("N0") : "—", "rpm",
                     // Pump graph gets headroom of 10% of the speed above and below, so the sensor's normal
                     // one-reading wiggles (a few %) look like small ticks instead of filling the graph.
                     PumpColor(st), app.PumpHist, Math.Max(50, (st.PumpRpm ?? 0) * 0.10), fBig, fMid, fSmall, bDim);
@@ -685,18 +689,18 @@ namespace LoopMedicTray
                     CpuColor(st), app.CpuHist, 1, fBig, fMid, fSmall, bDim);
 
                 // limits + today
-                string trips = (st.PumpStoppedRpm.HasValue ? "Trips: pump stopped (≤ " + st.PumpStoppedRpm.Value.ToString("N0") + " rpm)" : "Trips: pump < " + (st.PumpMinRpm ?? 0).ToString("N0") + " rpm") +
+                string trips = (st.PumpStoppedRpm.HasValue ? "Trips: " + st.cooler + " stopped (≤ " + st.PumpStoppedRpm.Value.ToString("N0") + " rpm)" : "Trips: " + st.cooler + " < " + (st.PumpMinRpm ?? 0).ToString("N0") + " rpm") +
                     (st.CpuMaxTemp.HasValue && st.CpuMaxTemp.Value > 0 ? "  ·  CPU ≥ " + st.CpuMaxTemp.Value.ToString("0") + " °C" : "  ·  CPU trip off");
                 g.DrawString(trips, fSmall, bDim, pad, y); y += 18 * S;
                 if (st.PumpStoppedRpm.HasValue)
                 {
-                    string warns = "Warns: pump < " + (st.PumpMinRpm ?? 0).ToString("N0") + " rpm";
+                    string warns = "Warns: " + st.cooler + " < " + (st.PumpMinRpm ?? 0).ToString("N0") + " rpm";
                     if (st.CpuTemp.HasValue && st.CpuMaxTemp.HasValue && st.CpuMaxTemp.Value > 0)
                         warns += "  ·  " + Math.Max(0, st.CpuMaxTemp.Value - st.CpuTemp.Value).ToString("0") + "° headroom";
                     g.DrawString(warns, fSmall, bDim, pad, y); y += 18 * S;
                 }
                 string today = "Today: CPU peak " + (st.DayMaxTemp.HasValue ? st.DayMaxTemp.Value.ToString("0") + " °C" : "—") +
-                               "  ·  pump min " + (st.DayMinPump.HasValue ? st.DayMinPump.Value.ToString("N0") + " rpm" : "—");
+                               "  ·  " + st.cooler + " min " + (st.DayMinPump.HasValue ? st.DayMinPump.Value.ToString("N0") + " rpm" : "—");
                 g.DrawString(today, fSmall, bDim, pad, y); y += 18 * S;
                 if (st.SelfTestAt.HasValue)
                 {
@@ -729,7 +733,7 @@ namespace LoopMedicTray
                 double maxRpm = Math.Max(1, live.Count > 0 ? live.Max(f => f.Rpm.Value) : 1);
                 foreach (var f in live)
                 {
-                    string name = f.Name + (f.IsPump ? "  · Pump" : "");
+                    string name = f.Name + (f.IsPump ? "  · " + st.Cooler : "");
                     using (var nb = new SolidBrush(f.IsPump ? Theme.Green : Theme.Text)) g.DrawString(name, fSmall, nb, pad, y);
                     string r = f.Rpm.Value.ToString("N0") + " rpm";
                     var rs = g.MeasureString(r, fSmall);
@@ -1115,7 +1119,8 @@ namespace LoopMedicTray
             this.app = app;
             S = Theme.Scale();
             isTest = st.TripKind == "test" || st.State == "TEST";
-            title = isTest ? "TEST: SIMULATED PUMP FAILURE" : st.TripKind == "cpu" ? "CPU TEMPERATURE LIMIT REACHED" : "PUMP FAILURE DETECTED";
+            string what = st.Cooler.ToUpperInvariant();
+            title = isTest ? "TEST: SIMULATED " + what + " FAILURE" : st.TripKind == "cpu" ? "CPU TEMPERATURE LIMIT REACHED" : what + " FAILURE DETECTED";
             reason = st.TripReason ?? "";
             deadline = st.TripDeadline ?? DateTime.Now.AddSeconds(15);
             total = Math.Max(1, (deadline - DateTime.Now).TotalSeconds);

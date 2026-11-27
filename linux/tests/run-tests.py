@@ -313,6 +313,17 @@ def t_last_poweroff_notice():
     return p
 
 
+def t_air_cooler_fan_stops():
+    r = Rig("air_cooler", pump=900, temp=95, CoolerType="air", PumpMinRpm=250).start(duration=16)
+    time.sleep(4); st = r.status(); r.set_pump(0)
+    r.wait(); log = r.log(); p = []
+    expect(st.get("coolerType") == "air", f"status says air cooler ({st.get('coolerType')})", p)
+    expect("air cooler" in log and "CPU fan: Fan #2" in log, "start line names the CPU fan", p)
+    expect("CPU fan stopped: 0 rpm" in log, "a stopped CPU fan is watched like a stopped pump", p)
+    expect("CPU fan at 0 rpm" in log and "would power off in 3s" in log, "same trip rule (CPU hot -> short countdown)", p)
+    return p
+
+
 def t_temperature_only():
     r = Rig("temp_only", PumpSensorId="").start(duration=6)
     time.sleep(5); st = r.status()

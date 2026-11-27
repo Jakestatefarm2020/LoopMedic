@@ -225,11 +225,16 @@ def likely_pump(fans):
     return in_range[0] if len(in_range) == 1 else None
 
 
-def pick_pump(fans):
+def pick_pump(fans, air=False):
     if not fans:
         return None
-    guess = likely_pump(fans)
-    if not any(1000 <= (f.read() or 0) <= 5000 for f in fans):
+    what = "CPU fan" if air else "pump"
+    if air:
+        named = [f for f in fans if re.search(r"cpu", f.label, re.I) and (f.read() or 0) > 150]
+        guess = named[0] if len(named) == 1 else None
+    else:
+        guess = likely_pump(fans)
+    if not air and not any(1000 <= (f.read() or 0) <= 5000 for f in fans):
         say("None of the motherboard headers is spinning at pump speeds (1,000-5,000 rpm).", "yellow")
         say("Some AIO coolers only report the pump speed over USB to their own app, with no speed wire")
         say("to the motherboard. If yours is one of them, choose 0: LoopMedic then protects with the CPU")
@@ -238,16 +243,20 @@ def pick_pump(fans):
         say("Fan sensors on your motherboard right now:")
         for i, f in enumerate(fans, 1):
             v = f.read() or 0
-            hint = f"   {C['green']}<- looks like the pump{C['x']}" if f is guess else ""
+            hint = f"   {C['green']}<- looks like the {what}{C['x']}" if f is guess else ""
             say(f"  {i:>2}. {f.label:<22} {v:>7,.0f} rpm   {C['dim']}[{f.chip} {f.chan}]{C['x']}{hint}")
-        say("   0. My pump is not on a motherboard header (temperature-only protection)")
-        say("   w. Watch them live for 20 s (change the pump speed while watching)")
+        say(f"   0. My {what} is not on a motherboard header (temperature-only protection)")
+        say(f"   w. Watch them live for 20 s (change the {what} speed while watching)")
         say()
-        say("How to spot the pump:", "bold")
-        say(" - The AIO's pump-speed cable usually goes to a header labelled PUMP_FAN1 / AIO_PUMP / CPU_FAN.")
-        say(" - Pumps usually spin at 1,500-4,000 rpm. Entries reading 0 are empty headers.")
+        say(f"How to spot the {what}:", "bold")
+        if air:
+            say(" - The cooler fan is plugged into the header labelled CPU_FAN (sometimes CPU_OPT for a second fan).")
+            say(" - CPU fans usually spin at 400-2,000 rpm. Entries reading 0 are empty headers.")
+        else:
+            say(" - The AIO's pump-speed cable usually goes to a header labelled PUMP_FAN1 / AIO_PUMP / CPU_FAN.")
+            say(" - Pumps usually spin at 1,500-4,000 rpm. Entries reading 0 are empty headers.")
         default = str(fans.index(guess) + 1) if guess else ""
-        a = input(f"Which number is your pump?{' (Enter = ' + default + ')' if default else ''} ").strip().lower()
+        a = input(f"Which number is your {what}?{' (Enter = ' + default + ')' if default else ''} ").strip().lower()
         if not a and default:
             a = default
         if a == "w":
@@ -260,6 +269,17 @@ def pick_pump(fans):
             return None
         cand = fans[n - 1]
         v = cand.read() or 0
+        if air:
+            if v <= 150:
+                # A fan that stops at idle (zero-RPM / fan-stop mode) would look like a dead fan and trip.
+                say('That fan reads 0 rpm right now. If it is your CPU fan, its "zero RPM" / "fan stop" mode is', "yellow")
+                say("probably on, so it stops when the PC is idle - LoopMedic would see that as a dead fan.", "yellow")
+                say("Turn fan stop off for the CPU fan in the BIOS, then run ./install.sh again,", "yellow")
+                say("or pick another number (0 = temperature only).", "yellow")
+                continue
+            if v < 300:
+                say("Note: that fan is running very slowly. Make sure it never stops completely at idle.", "yellow")
+            return cand
         if v < 500:
             say("That sensor reads under 500 rpm right now. Pick the one your pump is on.", "yellow")
             continue
@@ -268,7 +288,7 @@ def pick_pump(fans):
         return cand
 
 
-def dry_run_test(cfg_path, has_pump):
+def dry_run_test(cfg_path, has_pump, what="pump"):
     guard = os.path.join(HERE, "loopmedic.py")
     with tempfile.TemporaryDirectory(prefix="loopmedic-test-") as tmp:
         ctl = os.path.join(tmp, "control")
@@ -279,7 +299,7 @@ def dry_run_test(cfg_path, has_pump):
         if not has_pump:
             subprocess.run(base + ["--once"])
             return True
-        say("Pretending the pump spins, then stops (nothing will power off). About 70 seconds...")
+        say(f"Pretending the {what} spins, then stops (nothing will power off). About 70 seconds...")
         p = subprocess.Popen(base + ["--dry-run", "--simulate-pump", "0", "--simulate-healthy", "22", "--duration", "70"],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in p.stdout:
@@ -477,7 +497,7 @@ def main():
         uninstall()
         return 0
 
-    say("LoopMedic setup: powers the PC off if the AIO pump stops or the CPU overheats.", "bold")
+    say("LoopMedic setup: powers the PC off if the AIO pump (or CPU fan) stops or the CPU overheats.", "bold")
     say("by Jacob Stiltner", "dim")
     if not shutil.which("systemctl"):
         say("This needs systemd (systemctl). Setup stopped.", "red")
@@ -495,33 +515,46 @@ def main():
     temp = pg.find_cpu_temp(sensors)
 
     # Already installed with settings that still fit this PC? Offer to keep them.
-    keep, pump, max_temp = False, None, -1
+    keep, pump, max_temp, air = False, None, -1, False
     old_cfg = ETC_CFG if os.path.exists(ETC_CFG) else OLD_NAME_CFG
     if os.path.exists(old_cfg):
         try:
             old = json.load(open(old_cfg, encoding="utf-8"))
+            old_air = str(old.get("CoolerType") or "") == "air"
+            old_what = "CPU fan" if old_air else "Pump"
             old_pump = next((f for f in fans if f.id == old.get("PumpSensorId")), None) if old.get("PumpSensorId") else None
-            pump_ok = not old.get("PumpSensorId") or (old_pump and (old_pump.read() or 0) >= 500)
+            pump_ok = not old.get("PumpSensorId") or (old_pump and (old_pump.read() or 0) >= (160 if old_air else 500))
             cpu_ok = not old.get("CpuName") or old.get("CpuName") == cpu
             if pump_ok and cpu_ok and (old_pump or float(old.get("CpuMaxTempC") or 0) > 0):
                 say("LoopMedic is already installed with these settings:", "bold")
-                say(f"  Pump: {old_pump.label + ' (reading %s rpm now)' % format(old_pump.read() or 0, ',.0f') if old_pump else 'none (temperature only)'}")
+                say(f"  Cooler: {'air cooler' if old_air else 'AIO / water loop'}")
+                say(f"  {old_what}: {old_pump.label + ' (reading %s rpm now)' % format(old_pump.read() or 0, ',.0f') if old_pump else 'none (temperature only)'}")
                 old_limit = float(old.get("CpuMaxTempC") or 0)
                 say(f"  CPU limit: {'%g C' % old_limit if old_limit > 0 else 'off (no longer allowed - you will pick a limit)'}")
                 if yes_no("Keep these settings?"):
-                    keep, pump, max_temp = True, old_pump, old_limit
+                    keep, pump, max_temp, air = True, old_pump, old_limit, old_air
             elif not cpu_ok:
                 say(f"Your CPU changed ({old.get('CpuName')} -> {cpu}), so let's pick the settings again.", "yellow")
             else:
-                say("Your saved pump sensor is missing or not spinning, so let's pick it again.", "yellow")
+                say(f"Your saved {old_what.lower()} sensor is missing or not spinning, so let's pick it again.", "yellow")
         except (OSError, ValueError):
             pass
 
-    step("3/5  Finding your pump")
+    step("3/5  Your CPU cooler")
     if keep:
-        say(f"Keeping: {pump.label if pump else 'no pump (temperature only)'}")
+        say(f"Keeping: {pump.label if pump else 'temperature only'}")
     else:
-        pump = pick_pump(fans)
+        say("What cools your CPU?", "bold")
+        say("   1. An AIO or custom water loop (it has a pump)")
+        say("   2. An air cooler (a heatsink with a fan)")
+        while True:
+            c = input("Number (Enter = 1): ").strip()
+            if c in ("", "1", "2"):
+                air = c == "2"
+                break
+        say()
+        pump = pick_pump(fans, air)
+    what = "CPU fan" if air else "pump"
 
     step("4/5  CPU temperature limit")
     hot_s = None
@@ -534,7 +567,7 @@ def main():
         say(f"CPU temperature now: {temp.read()} C  ({temp.label})")
         max_temp, hot_s = choose_limit(cpu)
     if not pump and not temp:
-        say("No pump sensor and no CPU temperature sensor: there is nothing to watch. Setup stopped.", "red")
+        say(f"No {what} sensor and no CPU temperature sensor: there is nothing to watch. Setup stopped.", "red")
         return 1
 
     cfg_path = os.path.join(ROOT, "config.json")
@@ -543,18 +576,24 @@ def main():
     cfg["CpuTempSensorId"] = temp.id if temp else ""
     cfg["CpuName"] = cpu           # remembered so LoopMedic notices a CPU swap
     cfg["CpuMaxTempC"] = max_temp
+    cfg["CoolerType"] = "air" if air else "aio"
+    if air:
+        # CPU fans idle much slower than pumps: warn below 250 rpm (or 60% of what it reads now, if that's lower),
+        # but always above the 150 rpm "stopped" line. The stopped rule itself is the same as for a pump.
+        now_rpm = (pump.read() or 400) if pump else 400
+        cfg["PumpMinRpm"] = int(max(160, min(250, now_rpm * 0.6)))
     if hot_s:
         cfg["CpuHotSeconds"] = hot_s
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-    say(f"Saved: pump = {pump.label + ' [' + pump.id + ']' if pump else 'none (temperature only)'}, CPU limit = {'%g C' % max_temp if max_temp > 0 else 'none'}", "green")
+    say(f"Saved: {what} = {pump.label + ' [' + pump.id + ']' if pump else 'none (temperature only)'}, CPU limit = {'%g C' % max_temp if max_temp > 0 else 'none'}", "green")
 
     step("5/5  Safe test, then install")
-    if not dry_run_test(cfg_path, pump is not None):
+    if not dry_run_test(cfg_path, pump is not None, what):
         say("TEST FAILED: LoopMedic did not react. Not installing. Send the lines above to whoever gave you this.", "red")
         return 1
     if pump:
-        say("TEST PASSED: LoopMedic reacted to a dead pump (and would have powered off).", "green")
+        say(f"TEST PASSED: LoopMedic reacted to a dead {what} (and would have powered off).", "green")
     say()
     if not yes_no("Install LoopMedic (service + tray icon) so it runs at every boot?"):
         say("Not installed. Run ./install.sh again whenever you are ready.")

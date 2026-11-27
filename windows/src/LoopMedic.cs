@@ -548,6 +548,9 @@ namespace LoopMedic
             double rearmSeconds = Cfg("RearmSeconds", 120);
             double heartbeatMinutes = Cfg("HeartbeatMinutes", 60);
             if (pumpStoppedRpm >= pumpMinRpm) pumpStoppedRpm = Math.Max(0, pumpMinRpm - 1);
+            // Air cooler mode: the CPU fan takes the pump's place. Same rules, only the wording changes.
+            bool air = (Json.Str(cfg, "CoolerType") ?? "").Trim().ToLowerInvariant() == "air";
+            string Pw = air ? "CPU fan" : "Pump", pw = air ? "CPU fan" : "pump";
 
             // ---- sensors ----
             ISensorSource src;
@@ -571,11 +574,11 @@ namespace LoopMedic
                 pump = src.Sensors.FirstOrDefault(s => s.Id == pumpId);
                 if (pump == null)
                 {
-                    Log.Write("WARNING: pump sensor '" + pumpId + "' not found - pump check OFF.");
-                    startupProblems.Add("Pump sensor not found (BIOS/driver/hardware change?) - pump NOT watched. Re-run setup.");
+                    Log.Write("WARNING: " + pw + " sensor '" + pumpId + "' not found - " + pw + " check OFF.");
+                    startupProblems.Add(Pw + " sensor not found (BIOS/driver/hardware change?) - " + pw + " NOT watched. Re-run setup.");
                 }
             }
-            else Log.Write("No pump sensor in config.json (no pump speed wire on a motherboard header) - temperature-only protection.");
+            else Log.Write("No " + pw + " sensor in config.json (no speed wire on a motherboard header) - temperature-only protection.");
 
             string tempId = Json.Str(cfg, "CpuTempSensorId") ?? "";
             SensorInfo cpuTemp = tempId.Length > 0 ? src.Sensors.FirstOrDefault(s => s.Id == tempId) : null;
@@ -615,7 +618,7 @@ namespace LoopMedic
 
             if (pump == null && !tempCheckOn && !simulating)
             {
-                Fatal("no pump sensor and no CPU temperature; nothing to guard. Exiting (it will retry).", "Nothing can be watched - NOT PROTECTING.", 2);
+                Fatal("no " + pw + " sensor and no CPU temperature; nothing to guard. Exiting (it will retry).", "Nothing can be watched - NOT PROTECTING.", 2);
                 src.Close();
                 return 2;
             }
@@ -633,7 +636,7 @@ namespace LoopMedic
             string pumpDesc = pump != null ? pump.Name + " [" + pump.Id + "]" : "none";
             string tempDesc = cpuTemp != null ? cpuTemp.Name + " [" + cpuTemp.Id + "]" : "none";
             string mode = opt.DryRun ? "DRY RUN" : "ARMED";
-            string startLine = "LoopMedic " + Program.Version + " started (" + mode + "). Pump: " + pumpDesc + ", trips if stopped (<= " + F(pumpStoppedRpm) +
+            string startLine = "LoopMedic " + Program.Version + " started (" + mode + (air ? ", air cooler" : "") + "). " + Pw + ": " + pumpDesc + ", trips if stopped (<= " + F(pumpStoppedRpm) +
                 " rpm) for " + F(pumpFailSeconds) + "s (" + F(pumpFailCool) + "s while CPU < " + F(coolCpuTempC) + " C), slow warning below " + F(pumpMinRpm) +
                 " rpm. CPU: " + tempDesc + ", max " + F(cpuMaxTempC) + " C for " + F(cpuHotSeconds) + "s. Fans: " + fanSensors.Count + ". Power-off after " + delaySeconds +
                 "s (" + hotDelaySeconds + "s if the CPU is already hot).";
@@ -645,7 +648,7 @@ namespace LoopMedic
                 src.Update();
                 double? r = pump != null ? pump.Read() : null;
                 if (simulating) r = opt.SimulatePump;
-                Log.Write("Pump rpm: " + F(r) + "   CPU temp: " + F(cpuTemp != null ? cpuTemp.Read() : null) + " C");
+                Log.Write(Pw + " rpm: " + F(r) + "   CPU temp: " + F(cpuTemp != null ? cpuTemp.Read() : null) + " C");
                 foreach (var f in fanSensors) Log.Write("  " + f.Name.PadRight(20) + " " + F(f.Read()) + " rpm   [" + f.Id + "]");
                 src.Close();
                 return 0;
@@ -726,7 +729,7 @@ namespace LoopMedic
                     // reading to confirm. Rises are never dangerous, so holding one costs nothing.
                     if (pending.HasValue && Math.Abs(raw.Value - pending.Value) <= pending.Value * 0.25)
                     {
-                        if (!simulating) JumpLog(ref jumpHour, ref jumpCount, wall, F(accepted) + " -> " + F(raw) + " rpm (confirmed by the next reading) (CPU " + F(temp) + " C)");
+                        if (!simulating) JumpLog(Pw, ref jumpHour, ref jumpCount, wall, F(accepted) + " -> " + F(raw) + " rpm (confirmed by the next reading) (CPU " + F(temp) + " C)");
                         rpm = raw; pending = null;
                     }
                     else { pending = raw; rpm = accepted; }
@@ -740,7 +743,7 @@ namespace LoopMedic
                         pending = null;
                     }
                     else if (!simulating && accepted.Value > 0 && Math.Abs(raw.Value - accepted.Value) / accepted.Value > 0.15)
-                        JumpLog(ref jumpHour, ref jumpCount, wall, F(accepted) + " -> " + F(raw) + " rpm (CPU " + F(temp) + " C)");
+                        JumpLog(Pw, ref jumpHour, ref jumpCount, wall, F(accepted) + " -> " + F(raw) + " rpm (CPU " + F(temp) + " C)");
                     rpm = raw;   // drops always count, straight away
                 }
                 if (rpm.HasValue) accepted = rpm;
@@ -758,8 +761,8 @@ namespace LoopMedic
                 bool endNow = o.Duration > 0 && elapsed >= o.Duration;
                 if (endNow || (now - lastHeartbeat) / 60 >= heartbeatMinutes)
                 {
-                    Log.Write("OK  pump " + F(rpm) + " rpm, CPU " + F(temp) + " C  (since last line: CPU max " + F(maxTemp) + " C, pump min " + F(minRpm) + " / max " + F(maxRpm) + " rpm" +
-                        (glitches > 0 ? ", " + glitches + " one-reading pump glitch" + (glitches == 1 ? "" : "es") + " ignored" : "") + ")");
+                    Log.Write("OK  " + pw + " " + F(rpm) + " rpm, CPU " + F(temp) + " C  (since last line: CPU max " + F(maxTemp) + " C, " + pw + " min " + F(minRpm) + " / max " + F(maxRpm) + " rpm" +
+                        (glitches > 0 ? ", " + glitches + " one-reading " + pw + " glitch" + (glitches == 1 ? "" : "es") + " ignored" : "") + ")");
                     lastHeartbeat = now; maxTemp = null; minRpm = null; maxRpm = null; glitches = 0;
                 }
                 if (endNow) { Log.Write("Test duration reached - exiting."); src.Close(); return 0; }
@@ -767,14 +770,14 @@ namespace LoopMedic
                 // ---- requests from the tray app ----
                 // Pause: read once per new request and turned into a monotonic deadline, at most 2 h from when
                 // the request was WRITTEN, never from a file dated in the future. Clock changes can't stretch it.
-                DateTime pw;
-                DateTime? pv = Control.Read("pause.json", "until", out pw);
-                if (pv.HasValue && pw != pauseFileWritten)
+                DateTime pauseW;
+                DateTime? pv = Control.Read("pause.json", "until", out pauseW);
+                if (pv.HasValue && pauseW != pauseFileWritten)
                 {
-                    pauseFileWritten = pw;
-                    if (pw <= wall.AddMinutes(5))
+                    pauseFileWritten = pauseW;
+                    if (pauseW <= wall.AddMinutes(5))
                     {
-                        DateTime limit = pw.AddHours(2);
+                        DateTime limit = pauseW.AddHours(2);
                         DateTime until = pv.Value < limit ? pv.Value : limit;
                         double remaining = (until - wall).TotalSeconds;
                         pauseEndMono = remaining > 0 ? now + remaining : 0;
@@ -790,7 +793,7 @@ namespace LoopMedic
                 if (testAt.HasValue && testAt.Value > lastTestHandled && (wall - testAt.Value).TotalSeconds < 60 && trip == null)
                 {
                     lastTestHandled = testAt.Value;
-                    trip = Protect("test", "TEST - simulated pump failure (nothing will power off)", delaySeconds, now, wall);
+                    trip = Protect("test", "TEST - simulated " + pw + " failure (nothing will power off)", delaySeconds, now, wall);
                 }
 
                 DateTime? cancelAt = Control.Read("cancel.json", "at");
@@ -829,11 +832,11 @@ namespace LoopMedic
                 // ---- health: things that make the protection weaker ----
                 var degraded = new List<string>(startupProblems);
                 if (selfTestProblem != null) degraded.Add(selfTestProblem);
-                if (pumpNullSince.HasValue && now - pumpNullSince.Value >= 30) degraded.Add("Pump sensor not responding - pump NOT watched right now.");
+                if (pumpNullSince.HasValue && now - pumpNullSince.Value >= 30) degraded.Add(Pw + " sensor not responding - " + pw + " NOT watched right now.");
                 if (tempNullSince.HasValue && now - tempNullSince.Value >= 30) degraded.Add("CPU temperature not responding.");
                 bool inGrace = elapsed < graceSeconds;
                 bool pumpNeverSpun = (pump != null || simulating) && !pumpEverOk && !inGrace && rpm.HasValue;
-                if (pumpNeverSpun) degraded.Add("Pump has read " + F(rpm) + " rpm since boot - cable moved? Pump trip held; CPU temperature still watched.");
+                if (pumpNeverSpun) degraded.Add(Pw + " has read " + F(rpm) + " rpm since boot - cable moved? " + Pw + " trip held; CPU temperature still watched.");
                 // Slow but spinning: warn, don't power off (eco modes, or a pump that reports a different pulse
                 // count, can read low). The CPU temperature trip still covers a pump that's really failing.
                 if (pumpEverOk && rpm.HasValue && rpm.Value > pumpStoppedRpm && rpm.Value < pumpMinRpm)
@@ -841,8 +844,8 @@ namespace LoopMedic
                     if (!pumpSlowSince.HasValue) pumpSlowSince = now;
                     if (now - pumpSlowSince.Value >= pumpFailSeconds)
                     {
-                        degraded.Add("Pump slower than usual: " + F(rpm) + " rpm (warning below " + F(pumpMinRpm) + "). Not powering off for this alone; the CPU temperature trip is still armed.");
-                        if (!pumpSlowReported) { pumpSlowReported = true; Events.Warn(Events.PumpSlow, "Pump slower than usual: " + F(rpm) + " rpm."); }
+                        degraded.Add(Pw + " slower than usual: " + F(rpm) + " rpm (warning below " + F(pumpMinRpm) + "). Not powering off for this alone; the CPU temperature trip is still armed.");
+                        if (!pumpSlowReported) { pumpSlowReported = true; Events.Warn(Events.PumpSlow, Pw + " slower than usual: " + F(rpm) + " rpm."); }
                     }
                 }
                 else { pumpSlowSince = null; pumpSlowReported = false; }
@@ -868,19 +871,19 @@ namespace LoopMedic
                             if (!pumpBadSince.HasValue)
                             {
                                 pumpBadSince = now;
-                                Log.Write("Pump stopped: " + F(rpm) + " rpm - watching" + (cool ? " (CPU cool at " + F(temp) + " C: allowing " + F(pumpFailCool) + "s, e.g. for a firmware update)" : "") + ".");
+                                Log.Write(Pw + " stopped: " + F(rpm) + " rpm - watching" + (cool ? " (CPU cool at " + F(temp) + " C: allowing " + F(pumpFailCool) + "s, e.g. for a firmware update)" : "") + ".");
                             }
                             else if (now - pumpBadSince.Value >= window)
                             {
                                 bool hot = tempCheckOn && temp.HasValue && temp.Value >= cpuMaxTempC;
-                                trip = Protect("pump", "pump at " + F(rpm) + " rpm for " + (int)(now - pumpBadSince.Value) + "s (CPU " + F(temp) + " C)", hot ? hotDelaySeconds : delaySeconds, now, wall);
+                                trip = Protect("pump", pw + " at " + F(rpm) + " rpm for " + (int)(now - pumpBadSince.Value) + "s (CPU " + F(temp) + " C)", hot ? hotDelaySeconds : delaySeconds, now, wall);
                                 pumpBadSince = null; hotSince = null;
                                 cooldownUntil = now + rearmSeconds;
                             }
                         }
                         else if (pumpBadSince.HasValue)
                         {
-                            Log.Write("Pump recovered: " + F(rpm) + " rpm.");
+                            Log.Write(Pw + " recovered: " + F(rpm) + " rpm.");
                             pumpBadSince = null;
                         }
                     }
@@ -893,7 +896,7 @@ namespace LoopMedic
                             if (!hotSince.HasValue) { hotSince = now; Log.Write("CPU hot: " + F(temp) + " C - watching."); }
                             else if (now - hotSince.Value >= cpuHotSeconds)
                             {
-                                trip = Protect("cpu", "CPU at " + F(temp) + " C for " + (int)(now - hotSince.Value) + "s (pump " + F(rpm) + " rpm)", delaySeconds, now, wall);
+                                trip = Protect("cpu", "CPU at " + F(temp) + " C for " + (int)(now - hotSince.Value) + "s (" + pw + " " + F(rpm) + " rpm)", delaySeconds, now, wall);
                                 pumpBadSince = null; hotSince = null;
                                 cooldownUntil = now + rearmSeconds;
                             }
@@ -949,7 +952,7 @@ namespace LoopMedic
                         lastOffStatus = new Dictionary<string, object> { { "at", Json.Iso(lat.Value) }, { "reason", Json.Str(lastOff, "reason") } };
                 }
                 WriteStatus(new Dictionary<string, object> {
-                    { "at", Json.Iso(wall) }, { "version", Program.Version }, { "state", state }, { "dryRun", o.DryRun },
+                    { "at", Json.Iso(wall) }, { "version", Program.Version }, { "state", state }, { "dryRun", o.DryRun }, { "coolerType", air ? "air" : "aio" },
                     { "degraded", degraded.ToArray() }, { "pumpRpm", rpm }, { "cpuTemp", temp }, { "cpuName", cpuNow },
                     { "pumpMinRpm", pumpMinRpm }, { "pumpStoppedRpm", pumpStoppedRpm }, { "cpuMaxTemp", tempCheckOn ? cpuMaxTempC : 0 },
                     { "dayMaxTemp", dayMaxTemp }, { "dayMinPump", dayMinPump },
@@ -987,12 +990,12 @@ namespace LoopMedic
             else { Log.Write("Monthly self-test FAILED: " + detail + "."); Events.Error(Events.SelfTestFailed, "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off this PC."); problem = "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off. Reinstall."; }
         }
 
-        static void JumpLog(ref int hour, ref int count, DateTime wall, string text)
+        static void JumpLog(string who, ref int hour, ref int count, DateTime wall, string text)
         {
             if (hour != wall.Hour) { hour = wall.Hour; count = 0; }
             count++;
-            if (count <= 20) Log.Write("Pump jump: " + text);
-            else if (count == 21) Log.Write("Pump jump: more than 20 this hour - not logging the rest until the next hour.");
+            if (count <= 20) Log.Write(who + " jump: " + text);
+            else if (count == 21) Log.Write(who + " jump: more than 20 this hour - not logging the rest until the next hour.");
         }
 
         static bool ParentAlive(int pid)
