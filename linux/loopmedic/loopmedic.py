@@ -52,7 +52,7 @@ import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 GPU_CHIPS = {"amdgpu", "radeon", "nouveau", "nvidia", "i915", "xe"}
 CPU_CHIPS = ("k10temp", "zenpower", "coretemp")
 TIMER_UNIT = "loopmedic-poweroff"

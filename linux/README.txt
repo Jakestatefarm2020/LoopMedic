@@ -90,7 +90,8 @@ THE TRAY ICON
                pump speed, the last self-test, every fan with a speed bar,
                Pause 30 min / Run test / Open log, and a Live indicator
   Right-click  same actions, plus Themes (Stealth - the default -,
-               Atomic, Dark Side, Ice; status colours never change:
+               Atomic, Dark Side, Neon Dark, Neon Light, Ice; status
+               colours never change:
                green ARMED / Live, orange warnings, red alarms),
                Relearn normal pump speed, Send a test email (once email
                alerts are on) and Exit tray icon (protection keeps running)

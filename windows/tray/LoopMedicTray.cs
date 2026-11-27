@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Jacob Stiltner")]
 [assembly: System.Reflection.AssemblyProduct("LoopMedic")]
 [assembly: System.Reflection.AssemblyCopyright("(c) 2026 Jacob Stiltner")]
-[assembly: System.Reflection.AssemblyVersion("2.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("2.3.1.0")]
 
 namespace LoopMedicTray
 {
@@ -175,10 +175,10 @@ namespace LoopMedicTray
     // state is readable at a glance: green ARMED / Live, amber warnings, red alarms, blue tests, grey paused.
     static class Theme
     {
-        public static readonly string[] Names = { "Stealth", "Atomic", "Dark Side", "Ice" };
+        public static readonly string[] Names = { "Stealth", "Atomic", "Dark Side", "Neon Dark", "Neon Light", "Ice" };
         public static string Name = "Stealth";
         public static bool Dark = true;
-        public static Color Bg, Card, CardHot, Line, Text, Dim, Accent, Accent2, Link, WarnText;
+        public static Color Bg, Card, CardHot, Line, Text, Dim, Accent, Accent2, CpuAccent, Link, WarnText, UpdateBtn;
         public static readonly Color Green = Color.FromArgb(76, 194, 107), Amber = Color.FromArgb(240, 168, 48),
                                      Red = Color.FromArgb(229, 72, 77), Blue = Color.FromArgb(76, 154, 255),
                                      Grey = Color.FromArgb(138, 143, 152), Off = Color.FromArgb(90, 90, 98);
@@ -191,10 +191,10 @@ namespace LoopMedicTray
         {
             switch (name)
             {
-                case "Atomic":       // deep navy, electric blue + yellow
+                case "Atomic":       // deep navy + yellow: pump/CPU readings, graphs and the pump bar; other fans grey
                     Bg = C(13, 21, 43); Card = C(22, 35, 68); CardHot = C(34, 52, 96); Line = C(40, 58, 100);
                     Text = C(236, 242, 255); Dim = C(146, 163, 200);
-                    Accent = C(56, 189, 255); Accent2 = C(255, 214, 10);
+                    Accent = C(255, 214, 10); Accent2 = C(150, 162, 190);
                     Link = C(255, 214, 10); Dark = true;
                     break;
                 case "Dark Side":    // near-black purple, blue + pink/magenta
@@ -202,6 +202,18 @@ namespace LoopMedicTray
                     Text = C(246, 236, 252); Dim = C(176, 152, 190);
                     Accent = C(84, 150, 255); Accent2 = C(255, 77, 196);
                     Link = C(255, 128, 214); Dark = true;
+                    break;
+                case "Neon Dark":    // near-black purple: hot magenta pump, neon cyan CPU; other fans grey
+                    Bg = C(18, 10, 24); Card = C(33, 19, 44); CardHot = C(50, 30, 66); Line = C(62, 38, 80);
+                    Text = C(246, 236, 252); Dim = C(176, 152, 190);
+                    Accent = C(255, 77, 196); Accent2 = C(168, 150, 182); CpuAccent = C(0, 229, 255);   // + neon cyan CPU
+                    Link = C(255, 128, 214); Dark = true;
+                    break;
+                case "Neon Light":   // soft lilac white: magenta pump, electric violet CPU, neon orange for the other fans
+                    Bg = C(253, 247, 252); Card = C(246, 232, 246); CardHot = C(236, 214, 238); Line = C(230, 210, 232);
+                    Text = C(48, 18, 62); Dim = C(124, 98, 140);
+                    Accent = C(214, 0, 128); Accent2 = C(255, 122, 0); CpuAccent = C(124, 58, 237);
+                    Link = C(196, 0, 120); Dark = false;
                     break;
                 case "Ice":          // white, blue graphs and text
                     Bg = C(247, 250, 255); Card = C(230, 239, 250); CardHot = C(214, 228, 246); Line = C(204, 217, 235);
@@ -217,7 +229,10 @@ namespace LoopMedicTray
                     Link = C(122, 176, 255); Dark = true;
                     break;
             }
+            if (name != "Neon Dark" && name != "Neon Light") CpuAccent = Accent;   // the Neon themes give the CPU its own colour
             Name = name;
+            // "Update now" button: the theme's main colour where the other fans are grey, else the second colour.
+            UpdateBtn = name == "Atomic" || name.StartsWith("Neon") ? Accent : Accent2;
             // Long warning lines: the same amber, a shade deeper on the white theme so the words stay readable.
             WarnText = Dark ? Amber : Color.FromArgb(178, 110, 0);
         }
@@ -929,7 +944,7 @@ namespace LoopMedicTray
             double lim = st.CpuMaxTemp.HasValue && st.CpuMaxTemp.Value > 0 ? st.CpuMaxTemp.Value : 95;
             if (st.CpuTemp.Value >= lim) return Theme.Red;
             if (st.CpuTemp.Value >= lim - 10) return Theme.Amber;
-            return Theme.Accent;
+            return Theme.CpuAccent;
         }
 
         void DrawMetric(Graphics g, ref float y, float pad, float W, string label, string value, string unit, Color c,
@@ -1106,13 +1121,13 @@ namespace LoopMedicTray
             var notes = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
                                       BackColor = Theme.Card, ForeColor = Theme.Text, Text = Clean(rel.Notes), TabStop = false,
                                       Location = new Point(pad, pad + (int)(80 * S)), Size = new Size(w, (int)(150 * S)) };
-            var link = new LinkLabel { Text = "Full changelog on GitHub", LinkColor = Theme.Link, ActiveLinkColor = Theme.Accent2, VisitedLinkColor = Theme.Link,
+            var link = new LinkLabel { Text = "Full changelog on GitHub", LinkColor = Theme.Link, ActiveLinkColor = Theme.UpdateBtn, VisitedLinkColor = Theme.Link,
                                        LinkBehavior = LinkBehavior.HoverUnderline, AutoSize = true, Location = new Point(pad, pad + (int)(238 * S)) };
             link.LinkClicked += delegate { try { Process.Start(rel.PageUrl); } catch { } };
             status = new Label { ForeColor = Theme.Dim, Location = new Point(pad, pad + (int)(258 * S)), Size = new Size(w, (int)(18 * S)) };
             int bh = (int)(32 * S), bw = (int)(120 * S), by = ClientSize.Height - pad - bh;
             bLater = Flat("Later", Theme.Card, new Rectangle(ClientSize.Width - pad - bw, by, bw, bh));
-            bUpdate = Flat("Update now", Theme.Accent2, new Rectangle(ClientSize.Width - pad - bw * 2 - (int)(8 * S), by, bw, bh));
+            bUpdate = Flat("Update now", Theme.UpdateBtn, new Rectangle(ClientSize.Width - pad - bw * 2 - (int)(8 * S), by, bw, bh));
             bLater.Click += delegate { Close(); };
             bUpdate.Click += delegate { StartUpdate(); };
             Controls.AddRange(new Control[] { title, sub, head, notes, link, status, bUpdate, bLater });

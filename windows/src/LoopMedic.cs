@@ -35,7 +35,7 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyDescription("LoopMedic watchdog - powers the PC off if the AIO pump stops or the CPU overheats")]
 [assembly: AssemblyCompany("Jacob Stiltner")]
 [assembly: AssemblyCopyright("(c) 2026 Jacob Stiltner")]
-[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyVersion("2.3.1.0")]
 
 namespace LoopMedic
 {
@@ -97,7 +97,7 @@ namespace LoopMedic
 
     static class Program
     {
-        public const string Version = "2.3.0";
+        public const string Version = "2.3.1";
         public static Options Opt;
 
         static int Main(string[] args)

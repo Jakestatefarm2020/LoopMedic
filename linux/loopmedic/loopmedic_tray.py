@@ -145,12 +145,17 @@ THEMES = {
     "Stealth": ((28, 28, 33), (38, 38, 45), (58, 58, 68), (55, 55, 64), (236, 236, 240), (150, 150, 160),
                 (76, 194, 107), (76, 154, 255), (240, 168, 48), (229, 72, 77), (122, 176, 255), (138, 143, 152), (90, 90, 98)),
     "Atomic": ((13, 21, 43), (22, 35, 68), (34, 52, 96), (40, 58, 100), (236, 242, 255), (146, 163, 200),
-               (56, 189, 255), (255, 214, 10), (255, 138, 40), (255, 70, 85), (255, 214, 10), (140, 150, 170), (85, 95, 115)),
+               (255, 214, 10), (150, 162, 190), (255, 138, 40), (255, 70, 85), (255, 214, 10), (140, 150, 170), (85, 95, 115)),
     "Dark Side": ((18, 10, 24), (33, 19, 44), (50, 30, 66), (62, 38, 80), (246, 236, 252), (176, 152, 190),
                   (84, 150, 255), (255, 77, 196), (255, 170, 50), (255, 59, 59), (255, 128, 214), (150, 140, 160), (95, 85, 105)),
+    "Neon Dark": ((18, 10, 24), (33, 19, 44), (50, 30, 66), (62, 38, 80), (246, 236, 252), (176, 152, 190),
+                  (255, 77, 196), (168, 150, 182), (255, 170, 50), (255, 59, 59), (255, 128, 214), (150, 140, 160), (95, 85, 105)),
+    "Neon Light": ((253, 247, 252), (246, 232, 246), (236, 214, 238), (230, 210, 232), (48, 18, 62), (124, 98, 140),
+                   (214, 0, 128), (255, 122, 0), (196, 118, 0), (206, 32, 48), (196, 0, 120), (118, 128, 144), (160, 168, 180)),
     "Ice": ((247, 250, 255), (230, 239, 250), (214, 228, 246), (204, 217, 235), (16, 48, 96), (88, 112, 148),
             (22, 112, 224), (70, 160, 240), (196, 118, 0), (206, 32, 48), (0, 96, 200), (118, 128, 144), (160, 168, 180)),
 }
+CPU_ACCENT = {"Neon Dark": (0, 229, 255), "Neon Light": (124, 58, 237)}   # the Neon themes give the CPU its own colour
 THEME_FILE = os.path.join(os.path.expanduser("~"), ".config", "loopmedic", "theme.txt")   # per user
 
 
@@ -165,9 +170,10 @@ class T:
             name = "Stealth"
         c = [QColor(*x) for x in THEMES[name]]
         T.Bg, T.Card, T.Hot, T.Line, T.Text, T.Dim, T.Accent, T.Accent2, T.Link = c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[10]
+        T.CpuAccent = QColor(*CPU_ACCENT[name]) if name in CPU_ACCENT else T.Accent
         T.name = name
-        # Long warning lines: the same amber, a shade deeper on the white theme so the words stay readable.
-        T.WarnText = QColor(178, 110, 0) if name == "Ice" else T.Amber
+        # Long warning lines: the same amber, a shade deeper on the light themes so the words stay readable.
+        T.WarnText = QColor(178, 110, 0) if name in ("Ice", "Neon Light") else T.Amber
 
     @staticmethod
     def load():
@@ -644,7 +650,7 @@ class Panel(QWidget, Clickable):
             return T.Red
         if st.cpu_temp >= lim - 10:
             return T.Amber
-        return T.Accent
+        return T.CpuAccent
 
     def draw_metric(self, g, y, pad, W, label, value, unit, c, hist, floor, fBig, fMid, fSmall):
         card = QRectF(pad, y, W - pad * 2, 56)

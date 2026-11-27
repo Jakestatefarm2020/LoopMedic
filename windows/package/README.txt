@@ -172,8 +172,10 @@ under the ^ arrow - drag it onto the taskbar to keep it visible).
                  - bottom-left dot: Live (green), Waiting for sensors
                    (orange, 10-20 sec old), Offline (20+ sec)
   Right-click  the same actions, plus:
-                 - Themes: Stealth (default, dark), Atomic (blue and
-                   yellow), Dark Side (blue and pink), Ice (white).
+                 - Themes: Stealth (default, dark), Atomic (navy and
+                   yellow), Dark Side (blue and pink), Neon Dark (magenta
+                   and cyan), Neon Light (magenta, violet and orange
+                   on white), Ice (white).
                    Status colours never change: green ARMED / Live,
                    orange warnings, red alarms.
                  - Relearn normal pump speed (only with the early

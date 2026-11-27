@@ -2,6 +2,14 @@
 
 LoopMedic for Linux. The Windows version (../windows) keeps the same version numbers and rules.
 
+## 2.3.1 — 2026-11-27
+
+- **Two new themes.** Tray right-click > Themes: **Neon Dark** (hot magenta pump, neon cyan CPU) and
+  **Neon Light** (magenta pump, electric violet CPU, neon orange for the other fans, on white).
+- **Atomic** now uses yellow for the pump and CPU readings, both graphs and the pump bar; the other fans are
+  grey, so the pump stands out.
+- The README now says plainly that LoopMedic works with AIO / water coolers and air coolers.
+
 ## 2.3.0 — 2026-11-27
 
 - **Air coolers.** Setup asks what cools your CPU. With an air cooler, the CPU fan takes the pump's place:
