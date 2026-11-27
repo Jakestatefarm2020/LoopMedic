@@ -137,11 +137,11 @@ class Bridge(QObject):
 
 
 # ------------------------------------------------------------------ theme
-# Themes (tray right-click > Themes). Green = "all good" (graphs, pump bar, ARMED), Blue = the second accent
-# (fan bars, TEST), Amber / Red = warnings and alarms. Every theme keeps those last two clearly apart from its
-# accents, so a warning never blends in.
+# Themes (tray right-click > Themes) change the background, graphs, fan bars and links: Accent = the "all good"
+# graph colour and the pump bar, Accent2 = the other fan bars. STATUS colours never change with the theme, so the
+# state is readable at a glance: green ARMED / Live, amber warnings, red alarms, blue tests, grey paused.
 THEMES = {
-    # name: (Bg, Card, Hot, Line, Text, Dim, Green, Blue, Amber, Red, Link, Grey, Off)
+    # name: (Bg, Card, Hot, Line, Text, Dim, Accent, Accent2, -, -, Link, -, -)   (the - slots are ignored)
     "Stealth": ((28, 28, 33), (38, 38, 45), (58, 58, 68), (55, 55, 64), (236, 236, 240), (150, 150, 160),
                 (76, 194, 107), (76, 154, 255), (240, 168, 48), (229, 72, 77), (122, 176, 255), (138, 143, 152), (90, 90, 98)),
     "Atomic": ((13, 21, 43), (22, 35, 68), (34, 52, 96), (40, 58, 100), (236, 242, 255), (146, 163, 200),
@@ -156,14 +156,18 @@ THEME_FILE = os.path.join(os.path.expanduser("~"), ".config", "loopmedic", "them
 
 class T:
     name = "Stealth"
+    Green, Amber, Red, Blue = QColor(76, 194, 107), QColor(240, 168, 48), QColor(229, 72, 77), QColor(76, 154, 255)
+    Grey, Off = QColor(138, 143, 152), QColor(90, 90, 98)
 
     @staticmethod
     def apply(name):
         if name not in THEMES:
             name = "Stealth"
-        (T.Bg, T.Card, T.Hot, T.Line, T.Text, T.Dim, T.Green, T.Blue, T.Amber, T.Red, T.Link, T.Grey,
-         T.Off) = (QColor(*c) for c in THEMES[name])
+        c = [QColor(*x) for x in THEMES[name]]
+        T.Bg, T.Card, T.Hot, T.Line, T.Text, T.Dim, T.Accent, T.Accent2, T.Link = c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[10]
         T.name = name
+        # Long warning lines: the same amber, a shade deeper on the white theme so the words stay readable.
+        T.WarnText = QColor(178, 110, 0) if name == "Ice" else T.Amber
 
     @staticmethod
     def load():
@@ -480,7 +484,7 @@ class Panel(QWidget, Clickable):
         # what's weakening the protection
         if st.degraded:
             g.setFont(fSmall)
-            g.setPen(T.Amber)
+            g.setPen(T.WarnText)
             for line in st.degraded:
                 box = QRectF(pad, y, W - pad * 2, 200)
                 br = g.boundingRect(box, Qt.TextWordWrap, "⚠ " + line)
@@ -518,11 +522,11 @@ class Panel(QWidget, Clickable):
         g.drawText(QPointF(pad, y + asc), today)
         y += 18
         if st.selftest_at:
-            g.setPen(T.Dim if st.selftest_ok else T.Amber)
+            g.setPen(T.Dim if st.selftest_ok else T.WarnText)
             g.drawText(QPointF(pad, y + asc), f"Self-test: {'OK' if st.selftest_ok else 'FAILED'} ({st.selftest_at:%d %b %Y})")
             y += 18
         if st.last_off_at:
-            g.setPen(T.Amber)
+            g.setPen(T.WarnText)
             box = QRectF(pad, y, W - pad * 2, 200)
             txt = f"⚡ LoopMedic powered off this PC on {st.last_off_at:%d %b at %H:%M}: {st.last_off_reason}"
             br = g.boundingRect(box, Qt.TextWordWrap, txt)
@@ -531,7 +535,7 @@ class Panel(QWidget, Clickable):
             g.setPen(T.Dim)
         y += 4
         if st.state == "PAUSED" and st.paused_until:
-            g.setPen(T.Amber)
+            g.setPen(T.WarnText)
             g.drawText(QPointF(pad, y - 4 + asc), f"Paused until {st.paused_until:%H:%M} - not protecting!")
             y += 16
 
@@ -547,7 +551,7 @@ class Panel(QWidget, Clickable):
         top = max([f["rpm"] for f in live] + [1])
         g.setFont(fSmall)
         for f in live:
-            g.setPen(T.Green if f["pump"] else T.Text)
+            g.setPen(T.Accent if f["pump"] else T.Text)
             g.drawText(QPointF(pad, y + asc), f["name"] + (f"  · {st.cooler_title}" if f["pump"] else ""))
             r = fmt_n(f["rpm"]) + " rpm"
             g.setPen(T.Text)
@@ -556,7 +560,7 @@ class Panel(QWidget, Clickable):
             g.fillPath(rounded(bar, 2.5), T.Card)
             fw = bar.width() * f["rpm"] / top
             if fw > 5:
-                g.fillPath(rounded(QRectF(bar.x(), bar.y(), fw, bar.height()), 2.5), T.Green if f["pump"] else T.Blue)
+                g.fillPath(rounded(QRectF(bar.x(), bar.y(), fw, bar.height()), 2.5), T.Accent if f["pump"] else T.Accent2)
             y += 22
         empty = len(st.fans) - len(live)
         g.setPen(T.Dim)
@@ -586,7 +590,7 @@ class Panel(QWidget, Clickable):
         elif age <= 10:
             upd, uc = "Live", T.Green
         else:
-            upd, uc = f"Waiting for sensors… ({age} s old)", T.Amber
+            upd, uc = f"Waiting for sensors… ({age} s old)", T.WarnText
         th = text_h(fTiny)
         g.setBrush(uc)
         g.setPen(Qt.NoPen)
@@ -617,12 +621,12 @@ class Panel(QWidget, Clickable):
                 return T.Red
             if st.pump_min and st.pump_rpm < st.pump_min:
                 return T.Amber
-            return T.Green
+            return T.Accent
         if st.pump_min and st.pump_rpm < st.pump_min:
             return T.Red
         if st.pump_min and st.pump_rpm < st.pump_min * 2:
             return T.Amber
-        return T.Green
+        return T.Accent
 
     @staticmethod
     def cpu_color(st):
@@ -633,7 +637,7 @@ class Panel(QWidget, Clickable):
             return T.Red
         if st.cpu_temp >= lim - 10:
             return T.Amber
-        return T.Green
+        return T.Accent
 
     def draw_metric(self, g, y, pad, W, label, value, unit, c, hist, floor, fBig, fMid, fSmall):
         card = QRectF(pad, y, W - pad * 2, 56)
@@ -654,9 +658,9 @@ class Panel(QWidget, Clickable):
     def button(self, g, r, text, cb, f, accent):
         self.buttons.append((r, text, cb))
         hot = self.hover == text
-        g.fillPath(rounded(r, 6), T.Green if accent else (T.Hot if hot else T.Card))
+        g.fillPath(rounded(r, 6), T.Accent if accent else (T.Hot if hot else T.Card))
         g.setFont(f)
-        g.setPen(T.on(T.Green) if accent else T.Text)
+        g.setPen(T.on(T.Accent) if accent else T.Text)
         g.drawText(r, Qt.AlignCenter, text)
 
 

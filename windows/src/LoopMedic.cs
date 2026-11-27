@@ -484,6 +484,229 @@ namespace LoopMedic
         public void Close() { try { computer.Close(); } catch { } }
     }
 
+    // ------------------------------------------------------------------ early warning: a pump slowing down
+    // A pump usually wears out slowly before it stops: its speed creeps down over days or weeks. Every
+    // HealthSampleMinutes (20) the watchdog turns the ~600 readings of that window into one sample: the median
+    // pump speed (and CPU temperature) per CPU-load band, so like is compared with like. Samples go to
+    // health-samples.jsonl (60 days kept). The first HealthLearnDays (14) of samples set the pump's NORMAL speed,
+    // kept in health.json: a fixed reference, so a pump that wears out slowly can't drag its own "normal" down with
+    // it. After that, the last HealthRecentDays (3) are compared with it. HealthWarnPercent (12) slower = a WARNING
+    // ONLY: a line in the log, a Windows notification from the tray, and an email if mail is set up. It never
+    // powers anything off and never shows as DEGRADED. A pump that runs clearly FASTER than its learned normal
+    // means its speed setting was changed: LoopMedic forgets the old normal and learns the new one. A deliberate
+    // slow-down can be relearned from the tray menu (control\health-reset.json).
+    class HealthTracker
+    {
+        public class Sample { public DateTime At; public Dictionary<string, double[]> Bands = new Dictionary<string, double[]>(); }   // band -> [rpm, temp, readings]
+
+        readonly string samplesPath, statePath, what;
+        readonly double sampleSeconds, learnDays, recentDays, warnFraction;
+        readonly int minReadings;
+        readonly Action<string, string> notify;   // ("warn" | "clear", text) -> mail
+        readonly List<Sample> samples = new List<Sample>();
+        readonly Dictionary<string, List<double>> rpms = new Dictionary<string, List<double>>(), temps = new Dictionary<string, List<double>>();
+        double windowStart;
+        DateTime learnFrom = DateTime.MinValue, lastReset = DateTime.MinValue, normalUntil = DateTime.MinValue;
+        readonly Dictionary<string, double> normal = new Dictionary<string, double>();   // band -> learned normal rpm
+        public DateTime? WarnedAt;
+        public double WarnedDrop;
+        public string WarningText;
+
+        public HealthTracker(string root, string what, double sampleMinutes, double learnDays, double recentDays, double warnPercent, int minReadings, Action<string, string> notify)
+        {
+            samplesPath = Path.Combine(root, "health-samples.jsonl");
+            statePath = Path.Combine(root, "health.json");
+            this.what = what; this.learnDays = learnDays; this.recentDays = recentDays; this.notify = notify;
+            sampleSeconds = Math.Max(5, sampleMinutes * 60);
+            warnFraction = Math.Max(0.03, warnPercent / 100.0);
+            this.minReadings = Math.Max(1, minReadings);
+            windowStart = Clock.Mono;
+            var st = Json.ReadFile(statePath, 64 * 1024);
+            if (st != null)
+            {
+                learnFrom = Json.Date(st, "learnFrom") ?? DateTime.MinValue;
+                lastReset = Json.Date(st, "lastResetRequest") ?? DateTime.MinValue;
+                WarnedAt = Json.Date(st, "warnedAt");
+                WarnedDrop = Json.Num(st, "warnedDrop") ?? 0;
+                WarningText = WarnedAt.HasValue ? Json.Str(st, "warning") : null;
+                normalUntil = Json.Date(st, "normalUntil") ?? DateTime.MinValue;
+                object no;
+                if (st.TryGetValue("normal", out no) && no is Dictionary<string, object>)
+                    foreach (var kv in (Dictionary<string, object>)no)
+                        try { normal[kv.Key] = Convert.ToDouble(kv.Value, CultureInfo.InvariantCulture); } catch { }
+            }
+            Load();
+        }
+
+        public static string Band(double? load)
+        {
+            if (!load.HasValue) return "all";
+            return load.Value < 25 ? "light" : load.Value < 60 ? "medium" : "heavy";
+        }
+
+        // One accepted reading (only while the pump is running normally: not paused, no countdown, not just after start or wake).
+        public void Add(double rpm, double? temp, double? load)
+        {
+            string b = Band(load);
+            if (!rpms.ContainsKey(b)) { rpms[b] = new List<double>(); temps[b] = new List<double>(); }
+            rpms[b].Add(rpm);
+            if (temp.HasValue) temps[b].Add(temp.Value);
+        }
+
+        // Every poll: closes the window when it's due, and handles a "relearn" request from the tray.
+        public void Tick(DateTime wall, double now)
+        {
+            DateTime? reset = Control.Read("health-reset.json", "at");
+            if (reset.HasValue && reset.Value > lastReset && reset.Value <= wall.AddMinutes(5))
+            {
+                lastReset = reset.Value;
+                Relearn(wall, "Relearn requested from the tray: forgetting the old normal " + what + " speed and learning it again (about " + F(learnDays) + " days).");
+            }
+            if (now - windowStart < sampleSeconds) return;
+            windowStart = now;
+            var s = new Sample { At = wall };
+            foreach (var kv in rpms)
+                if (kv.Value.Count >= minReadings)
+                    s.Bands[kv.Key] = new[] { Median(kv.Value), temps[kv.Key].Count > 0 ? Median(temps[kv.Key]) : double.NaN, kv.Value.Count };
+            rpms.Clear(); temps.Clear();
+            if (s.Bands.Count == 0) return;
+            samples.Add(s);
+            try { File.AppendAllText(samplesPath, Line(s) + "\n"); } catch { }
+            Analyze(wall);
+        }
+
+        public void Analyze(DateTime wall)
+        {
+            var usable = samples.Where(x => x.At >= learnFrom).ToList();
+            if (normal.Count == 0)
+            {
+                // Still learning: the normal speed is set once there are learnDays of history, from those first days.
+                if (usable.Count == 0) return;
+                DateTime first = usable.Min(x => x.At);
+                if ((wall - first).TotalDays < learnDays) return;
+                normalUntil = first.AddDays(learnDays);
+                foreach (string band in usable.SelectMany(x => x.Bands.Keys).Distinct())
+                {
+                    var v = usable.Where(x => x.At < normalUntil && x.Bands.ContainsKey(band)).Select(x => x.Bands[band][0]).ToList();
+                    if (v.Count >= 36) normal[band] = Median(v);   // at least ~12 h of running in that band
+                }
+                if (normal.Count == 0) return;
+                Log.Write("Learned the normal " + what + " speed: " + string.Join(", ", normal.Select(kv => kv.Value.ToString("N0", CultureInfo.InvariantCulture) + " rpm" + (kv.Key == "all" ? "" : " at " + kv.Key + " CPU load")).ToArray()) +
+                          ". Early warnings are on from now.");
+                SaveState();
+            }
+            DateTime cut = wall.AddDays(-recentDays);
+            if (cut < normalUntil) cut = normalUntil;
+            string worstBand = null; double worst = 0, wBase = 0, wRecent = 0, fastest = 0;
+            foreach (var kv in normal)
+            {
+                string band = kv.Key;
+                var recent = usable.Where(x => x.At >= cut && x.Bands.ContainsKey(band)).Select(x => x.Bands[band][0]).ToList();
+                if (recent.Count < 18) continue;   // ~6 h of recent running
+                double bse = kv.Value, r = Median(recent), drop = 1 - r / bse;
+                if (drop > worst) { worst = drop; worstBand = band; wBase = bse; wRecent = r; }
+                if (-drop > fastest) fastest = -drop;
+            }
+            if (fastest >= warnFraction && worst < warnFraction)
+            {
+                Relearn(wall, Cap(what) + " runs " + Pct(fastest) + " faster than its learned normal - its speed setting was probably changed. Learning the new normal (about " + F(learnDays) + " days).");
+                return;
+            }
+            if (worstBand != null && worst >= warnFraction)
+            {
+                bool first = !WarnedAt.HasValue;
+                if (first || (wall - WarnedAt.Value).TotalDays >= 7 || worst >= WarnedDrop + 0.05)
+                {
+                    WarnedAt = wall; WarnedDrop = worst;
+                    WarningText = "Your " + what + " has run " + Pct(worst) + " slower than its normal over the last " + F(recentDays) + " days (" +
+                        wRecent.ToString("N0", CultureInfo.InvariantCulture) + " rpm vs " + wBase.ToString("N0", CultureInfo.InvariantCulture) + " rpm" +
+                        (worstBand == "all" ? "" : " at " + worstBand + " CPU load") + "). " + Cap(what) + "s often slow down as they wear out - check it soon. " +
+                        "LoopMedic is still protecting this PC. If you lowered the " + what + " speed on purpose, right-click the tray icon > Relearn normal " + what + " speed.";
+                    Log.Write("EARLY WARNING: " + WarningText);
+                    SaveState();
+                    if (notify != null) notify("warn", WarningText);
+                }
+            }
+            else if (WarnedAt.HasValue && worst < warnFraction / 2)
+            {
+                Log.Write("Early warning cleared: the " + what + " is back to its normal speed.");
+                WarnedAt = null; WarnedDrop = 0; WarningText = null;
+                SaveState();
+                if (notify != null) notify("clear", "Your " + what + " is back to its normal speed.");
+            }
+        }
+
+        void Relearn(DateTime wall, string why)
+        {
+            Log.Write(why);
+            learnFrom = wall;
+            normal.Clear();
+            normalUntil = DateTime.MinValue;
+            samples.Clear();
+            try { File.WriteAllText(samplesPath, ""); } catch { }
+            WarnedAt = null; WarnedDrop = 0; WarningText = null;
+            SaveState();
+        }
+
+        void Load()
+        {
+            try
+            {
+                if (!File.Exists(samplesPath)) return;
+                DateTime oldest = Clock.Now.AddDays(-60);
+                int dropped = 0;
+                foreach (string line in File.ReadAllLines(samplesPath))
+                {
+                    var d = line.Length > 0 && line.Length < 4096 ? Json.Ser.DeserializeObject(line) as Dictionary<string, object> : null;
+                    DateTime? at = Json.Date(d, "at");
+                    object bo;
+                    if (!at.HasValue || !d.TryGetValue("bands", out bo) || !(bo is Dictionary<string, object>)) { dropped++; continue; }
+                    if (at.Value < oldest || at.Value < learnFrom) { dropped++; continue; }
+                    var s = new Sample { At = at.Value };
+                    foreach (var kv in (Dictionary<string, object>)bo)
+                    {
+                        var arr = kv.Value as object[];
+                        if (arr == null || arr.Length < 3) continue;
+                        try { s.Bands[kv.Key] = arr.Select(o => o == null ? double.NaN : Convert.ToDouble(o, CultureInfo.InvariantCulture)).ToArray(); } catch { }
+                    }
+                    if (s.Bands.Count > 0) samples.Add(s);
+                }
+                if (dropped > 0) File.WriteAllLines(samplesPath, samples.Select(Line).ToArray());   // prune old lines
+            }
+            catch { }
+        }
+
+        void SaveState()
+        {
+            try
+            {
+                Json.WriteAtomic(statePath, new Dictionary<string, object> {
+                    { "learnFrom", learnFrom == DateTime.MinValue ? null : Json.Iso(learnFrom) },
+                    { "lastResetRequest", lastReset == DateTime.MinValue ? null : Json.Iso(lastReset) },
+                    { "warnedAt", WarnedAt.HasValue ? Json.Iso(WarnedAt.Value) : null }, { "warnedDrop", WarnedDrop }, { "warning", WarningText },
+                    { "normal", normal.ToDictionary(kv => kv.Key, kv => (object)Math.Round(kv.Value, 1)) },
+                    { "normalUntil", normalUntil == DateTime.MinValue ? null : Json.Iso(normalUntil) } });
+            }
+            catch { }
+        }
+
+        static string Line(Sample s)
+        {
+            var bands = new Dictionary<string, object>();
+            foreach (var kv in s.Bands) bands[kv.Key] = kv.Value.Select(v => double.IsNaN(v) ? (object)null : Math.Round(v, 1)).ToArray();
+            return Json.Ser.Serialize(new Dictionary<string, object> { { "at", Json.Iso(s.At) }, { "bands", bands } });
+        }
+        public static double Median(List<double> v)
+        {
+            var s = v.OrderBy(x => x).ToList();
+            int n = s.Count;
+            return n == 0 ? double.NaN : n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+        }
+        static string Pct(double f) { return Math.Round(f * 100).ToString("0", CultureInfo.InvariantCulture) + "%"; }
+        static string F(double v) { return v.ToString("0.#", CultureInfo.InvariantCulture); }
+        static string Cap(string s) { return s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s.Substring(1); }
+    }
+
     // ------------------------------------------------------------------ the watchdog
     class Trip
     {
@@ -547,6 +770,7 @@ namespace LoopMedic
             int hotDelaySeconds = (int)Cfg("HotShutdownDelaySeconds", 5);
             double rearmSeconds = Cfg("RearmSeconds", 120);
             double heartbeatMinutes = Cfg("HeartbeatMinutes", 60);
+            double healthWarmup = Cfg("HealthWarmupSeconds", 300);    // no health samples for 5 min after start / wake
             if (pumpStoppedRpm >= pumpMinRpm) pumpStoppedRpm = Math.Max(0, pumpMinRpm - 1);
             // Air cooler mode: the CPU fan takes the pump's place. Same rules, only the wording changes.
             bool air = (Json.Str(cfg, "CoolerType") ?? "").Trim().ToLowerInvariant() == "air";
@@ -614,6 +838,7 @@ namespace LoopMedic
             bool tempCheckOn = cpuTemp != null;
 
             var fanSensors = src.Sensors.Where(s => s.Type == "Fan" && s.HardwareType != "Cpu").ToList();
+            SensorInfo cpuLoad = src.Sensors.FirstOrDefault(s => s.Type == "Load" && s.HardwareType == "Cpu" && s.Name == "CPU Total");
             bool simulating = opt.SimulatePump >= 0;
 
             if (pump == null && !tempCheckOn && !simulating)
@@ -687,6 +912,13 @@ namespace LoopMedic
             string selfTestProblem = null;
             if (selfTest != null && Json.Str(selfTest, "ok") == "False") selfTestProblem = "Monthly self-test FAILED: " + Json.Str(selfTest, "detail");
             double nextSelfTestMono = started + SelfTestDue(selfTest, o);
+            // early warning (a pump slowing down over days): only with a real pump/fan sensor, never in simulations
+            HealthTracker health = pump != null && !simulating
+                ? new HealthTracker(Paths.Root, pw, Cfg("HealthSampleMinutes", 20), Cfg("HealthLearnDays", 14), Cfg("HealthRecentDays", 3),
+                                    Cfg("HealthWarnPercent", 12), (int)Cfg("HealthMinReadings", 60), null)
+                : null;
+            if (health != null) health.Analyze(Clock.Now);
+            double lastWakeMono = started;
 
             while (true)
             {
@@ -706,6 +938,7 @@ namespace LoopMedic
                 double wallGap = (wall - lastCheckWall).TotalSeconds;
                 if (gap >= 10)
                 {
+                    lastWakeMono = now;   // after a sleep or a long stall, readings settle before health sampling resumes
                     if (stallHour != wall.Hour) { stallHour = wall.Hour; stallCount = 0; }
                     stallCount++;
                     // A quick sensor read inside a long gap means the whole PC paused (sleep), not the read.
@@ -931,6 +1164,15 @@ namespace LoopMedic
                     }
                 }
 
+                // ---- early warning: health samples (warning only, never a trip) ----
+                if (health != null)
+                {
+                    bool settled = elapsed >= healthWarmup && now - lastWakeMono >= healthWarmup;
+                    if (settled && !paused && trip == null && pumpEverOk && !pumpBadSince.HasValue && rpm.HasValue && rpm.Value > pumpStoppedRpm)
+                        health.Add(rpm.Value, temp, cpuLoad != null ? cpuLoad.Read() : null);
+                    health.Tick(wall, now);
+                }
+
                 // ---- status for the tray app ----
                 string state = "ARMED";
                 if (inGrace) state = "STARTING";
@@ -960,6 +1202,8 @@ namespace LoopMedic
                     { "tripKind", trip != null ? trip.Kind : null }, { "tripReason", trip != null ? trip.Reason : null },
                     { "tripDeadline", trip != null ? Json.Iso(wall.AddSeconds(trip.DeadlineMono - now)) : null },
                     { "lastPowerOff", lastOffStatus },
+                    // early warning: the tray shows it once as a Windows notification (never in the panel)
+                    { "healthWarning", health != null && health.WarningText != null ? new Dictionary<string, object> { { "id", Json.Iso(health.WarnedAt.Value) }, { "text", health.WarningText } } : null },
                     { "selfTest", selfTest != null ? new Dictionary<string, object> { { "at", Json.Str(selfTest, "at") }, { "ok", Json.Str(selfTest, "ok") == "True" } } : null },
                     { "fans", fans.ToArray() } });
                 if (File.Exists(Paths.SelfTest) && (selfTest == null || selfTestProc == null)) selfTest = Json.ReadFile(Paths.SelfTest, 16 * 1024) ?? selfTest;

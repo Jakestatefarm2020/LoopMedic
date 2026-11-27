@@ -342,6 +342,81 @@ def t_air_cooler_fan_stops():
     return p
 
 
+def health_history(rig, days, rpm_at, per_day=24, band="light"):
+    """Pre-write `days` of health samples (newest last). rpm_at(days_ago) -> median rpm for that sample."""
+    now = datetime.now()
+    lines = []
+    for i in range(days * per_day, 0, -1):
+        ago = i / per_day
+        at = (now - timedelta(days=ago)).astimezone().isoformat()
+        lines.append(json.dumps({"at": at, "bands": {band: [round(rpm_at(ago), 1), 45.0, 60]}}))
+    with open(os.path.join(rig.root, "health-samples.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def t_health_dying_pump():
+    r = Rig("health_dying")
+    health_history(r, 30, lambda ago: 2050 if ago <= 3 else 2400)    # the last 3 days ~15% slower
+    r.start(duration=8)
+    time.sleep(6); st = r.status()
+    r.wait(); log = r.log(); p = []
+    expect("EARLY WARNING: Your pump has run 15% slower" in log, "15% slower for 3 days -> early warning in the log", p)
+    hw = st.get("healthWarning") or {}
+    expect("slower than its normal" in (hw.get("text") or ""), f"warning handed to the tray ({hw})", p)
+    expect(st.get("state") in ("ARMED", "STARTING"), f"a warning only - protection state unchanged ({st.get('state')})", p)
+    expect(not st.get("degraded"), "not shown as DEGRADED", p)
+    return p
+
+
+def t_health_speed_setting_raised():
+    r = Rig("health_raised")
+    health_history(r, 30, lambda ago: 2800 if ago <= 3 else 2400)    # pump curve changed upwards
+    r.start(duration=6)
+    r.wait(); log = r.log(); p = []
+    expect("faster than its learned normal" in log and "Learning the new normal" in log, "faster = setting changed -> relearn", p)
+    expect("EARLY WARNING" not in log, "no warning for a faster pump", p)
+    with open(os.path.join(r.root, "health-samples.jsonl"), encoding="utf-8") as f:
+        expect(f.read().strip() == "", "old normal forgotten", p)
+    return p
+
+
+def t_health_slow_decline():
+    # 14 flat days set the normal, then the pump loses ~20 rpm a day for 23 days: the fixed normal catches it
+    r = Rig("health_decline")
+    health_history(r, 37, lambda ago: 2400 if ago >= 23 else 2400 - (23 - ago) * 20)
+    r.start(duration=6)
+    r.wait(); log = r.log(); p = []
+    expect("Learned the normal pump speed: 2,400 rpm" in log, "normal learned from the first 14 days", p)
+    expect("EARLY WARNING" in log, "a slow decline is caught against the fixed normal", p)
+    return p
+
+
+def t_health_steady_and_learning():
+    a = Rig("health_steady"); health_history(a, 30, lambda ago: 2400 + (ago % 1) * 20)
+    b = Rig("health_learning"); health_history(b, 5, lambda ago: 2000 if ago <= 2 else 2400)   # only 5 days: still learning
+    a.start(duration=6); b.start(duration=6)
+    a.wait(); b.wait(); p = []
+    expect("EARLY WARNING" not in a.log(), "a steady pump never warns", p)
+    expect("EARLY WARNING" not in b.log(), "no warning before 14 days of history", p)
+    return p
+
+
+def t_health_samples_and_relearn():
+    # short windows: a sample every 6 s from 3+ readings, no warm-up
+    r = Rig("health_sampling", HealthSampleMinutes=0.1, HealthMinReadings=3, HealthWarmupSeconds=0).start(duration=26)
+    time.sleep(16)
+    r.control("health-reset.json", "at", datetime.now())
+    r.wait(); p = []
+    path = os.path.join(r.root, "health-samples.jsonl")
+    lines = open(path, encoding="utf-8").read().split() if os.path.exists(path) else []
+    expect("Relearn requested from the tray" in r.log(), "relearn request from the tray handled", p)
+    expect(len(lines) >= 1, f"samples written after the relearn ({len(lines)})", p)
+    if lines:
+        s = json.loads(lines[-1])
+        expect("all" in s["bands"] and abs(s["bands"]["all"][0] - 2400) < 1, f"sample = median rpm of the window ({s})", p)
+    return p
+
+
 def t_temperature_only():
     r = Rig("temp_only", PumpSensorId="").start(duration=10)
     time.sleep(8); st = r.status()

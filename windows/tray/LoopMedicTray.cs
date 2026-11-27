@@ -75,6 +75,7 @@ namespace LoopMedicTray
         public double? PumpRpm, CpuTemp, PumpMinRpm, PumpStoppedRpm, CpuMaxTemp, DayMaxTemp, DayMinPump;
         public DateTime? LastPowerOffAt, SelfTestAt;
         public string LastPowerOffReason;
+        public string HealthId, HealthText;   // early warning (pump slowing down): a notification only, never drawn in the panel
         public bool SelfTestOk;
         public string CpuName = "";
         public DateTime? PausedUntil, TripDeadline;
@@ -130,6 +131,11 @@ namespace LoopMedicTray
                     var lp = (Dictionary<string, object>)sub;
                     st.LastPowerOffAt = Date(lp, "at"); st.LastPowerOffReason = Str(lp, "reason");
                 }
+                if (d.TryGetValue("healthWarning", out sub) && sub is Dictionary<string, object>)
+                {
+                    var hw = (Dictionary<string, object>)sub;
+                    st.HealthId = Str(hw, "id"); st.HealthText = Str(hw, "text");
+                }
                 if (d.TryGetValue("selfTest", out sub) && sub is Dictionary<string, object>)
                 {
                     var stt = (Dictionary<string, object>)sub;
@@ -160,15 +166,18 @@ namespace LoopMedicTray
     }
 
     // ------------------------------------------------------------------ look
-    // Themes (tray right-click > Themes). Green = "all good" (graphs, pump bar, ARMED), Blue = the second accent
-    // (fan bars, TEST), Amber / Red = warnings and alarms. Every theme keeps those last two clearly apart from
-    // its accents, so a warning never blends in.
+    // Themes (tray right-click > Themes) change the background, graphs, fan bars and links: Accent = the "all good"
+    // graph colour and the pump bar, Accent2 = the other fan bars. STATUS colours never change with the theme, so the
+    // state is readable at a glance: green ARMED / Live, amber warnings, red alarms, blue tests, grey paused.
     static class Theme
     {
         public static readonly string[] Names = { "Stealth", "Atomic", "Dark Side", "Ice" };
         public static string Name = "Stealth";
         public static bool Dark = true;
-        public static Color Bg, Card, CardHot, Line, Text, Dim, Green, Amber, Red, Blue, Link, Grey, Off;
+        public static Color Bg, Card, CardHot, Line, Text, Dim, Accent, Accent2, Link, WarnText;
+        public static readonly Color Green = Color.FromArgb(76, 194, 107), Amber = Color.FromArgb(240, 168, 48),
+                                     Red = Color.FromArgb(229, 72, 77), Blue = Color.FromArgb(76, 154, 255),
+                                     Grey = Color.FromArgb(138, 143, 152), Off = Color.FromArgb(90, 90, 98);
 
         static Theme() { Apply(Load()); }
 
@@ -181,30 +190,32 @@ namespace LoopMedicTray
                 case "Atomic":       // deep navy, electric blue + yellow
                     Bg = C(13, 21, 43); Card = C(22, 35, 68); CardHot = C(34, 52, 96); Line = C(40, 58, 100);
                     Text = C(236, 242, 255); Dim = C(146, 163, 200);
-                    Green = C(56, 189, 255); Blue = C(255, 214, 10); Amber = C(255, 138, 40); Red = C(255, 70, 85);
-                    Link = C(255, 214, 10); Grey = C(140, 150, 170); Off = C(85, 95, 115); Dark = true;
+                    Accent = C(56, 189, 255); Accent2 = C(255, 214, 10);
+                    Link = C(255, 214, 10); Dark = true;
                     break;
                 case "Dark Side":    // near-black purple, blue + pink/magenta
                     Bg = C(18, 10, 24); Card = C(33, 19, 44); CardHot = C(50, 30, 66); Line = C(62, 38, 80);
                     Text = C(246, 236, 252); Dim = C(176, 152, 190);
-                    Green = C(84, 150, 255); Blue = C(255, 77, 196); Amber = C(255, 170, 50); Red = C(255, 59, 59);
-                    Link = C(255, 128, 214); Grey = C(150, 140, 160); Off = C(95, 85, 105); Dark = true;
+                    Accent = C(84, 150, 255); Accent2 = C(255, 77, 196);
+                    Link = C(255, 128, 214); Dark = true;
                     break;
                 case "Ice":          // white, blue graphs and text
                     Bg = C(247, 250, 255); Card = C(230, 239, 250); CardHot = C(214, 228, 246); Line = C(204, 217, 235);
                     Text = C(16, 48, 96); Dim = C(88, 112, 148);
-                    Green = C(22, 112, 224); Blue = C(70, 160, 240); Amber = C(196, 118, 0); Red = C(206, 32, 48);
-                    Link = C(0, 96, 200); Grey = C(118, 128, 144); Off = C(160, 168, 180); Dark = false;
+                    Accent = C(22, 112, 224); Accent2 = C(70, 160, 240);
+                    Link = C(0, 96, 200); Dark = false;
                     break;
                 default:             // Stealth: the original dark look
                     name = "Stealth";
                     Bg = C(28, 28, 33); Card = C(38, 38, 45); CardHot = C(58, 58, 68); Line = C(55, 55, 64);
                     Text = C(236, 236, 240); Dim = C(150, 150, 160);
-                    Green = C(76, 194, 107); Blue = C(76, 154, 255); Amber = C(240, 168, 48); Red = C(229, 72, 77);
-                    Link = C(122, 176, 255); Grey = C(138, 143, 152); Off = C(90, 90, 98); Dark = true;
+                    Accent = C(76, 194, 107); Accent2 = C(76, 154, 255);
+                    Link = C(122, 176, 255); Dark = true;
                     break;
             }
             Name = name;
+            // Long warning lines: the same amber, a shade deeper on the white theme so the words stay readable.
+            WarnText = Dark ? Amber : Color.FromArgb(178, 110, 0);
         }
 
         // Text that reads on top of a coloured button: black on light colours, white on dark ones.
@@ -293,7 +304,7 @@ namespace LoopMedicTray
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly Dictionary<string, Icon> icons = new Dictionary<string, Icon>();
         readonly ContextMenuStrip menu = new ContextMenuStrip();
-        readonly ToolStripMenuItem miPause, miTest, miThemes;
+        readonly ToolStripMenuItem miPause, miTest, miThemes, miRelearn;
         public readonly List<double> PumpHist = new List<double>(), CpuHist = new List<double>();
         public Status Current = new Status();
         DateTime lastAt = DateTime.MinValue, lastHeartbeat = DateTime.MinValue;
@@ -322,12 +333,15 @@ namespace LoopMedicTray
                 miThemes.DropDownItems.Add(new ToolStripMenuItem(name, null, delegate { SetTheme(name); }));
             }
             menu.Items.Add(miThemes);
+            miRelearn = new ToolStripMenuItem("Relearn normal pump speed", null, delegate { Relearn(); });
+            menu.Items.Add(miRelearn);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit tray icon (protection keeps running)", null, delegate { ExitApp(); });
             menu.Opening += delegate
             {
                 miPause.Text = Current.State == "PAUSED" ? "Resume protection" : "Pause 30 min";
                 foreach (ToolStripMenuItem t in miThemes.DropDownItems) t.Checked = t.Text == Theme.Name;
+                miRelearn.Text = "Relearn normal " + Current.cooler + " speed";
             };
 
             ni.ContextMenuStrip = menu;
@@ -412,9 +426,40 @@ namespace LoopMedicTray
                 true, ToolTipIcon.Warning);
         }
 
+        // Early warning (the pump has been slowing down for days): one Windows notification per warning, remembered per
+        // user. It stays in the notification center; the panel never shows it.
+        readonly HashSet<string> shownHealth = new HashSet<string>();
+        void NotifyHealth()
+        {
+            if (string.IsNullOrEmpty(Current.HealthId) || string.IsNullOrEmpty(Current.HealthText) || shownHealth.Contains(Current.HealthId)) return;
+            shownHealth.Add(Current.HealthId);
+            string seenFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LoopMedic", "seen-health.txt");
+            try
+            {
+                var seen = File.Exists(seenFile) ? File.ReadAllLines(seenFile).Select(l => l.Trim()).Where(l => l.Length > 0).ToList() : new List<string>();
+                if (seen.Contains(Current.HealthId)) return;
+                seen.Add(Current.HealthId);
+                Directory.CreateDirectory(Path.GetDirectoryName(seenFile));
+                File.WriteAllLines(seenFile, seen.Skip(Math.Max(0, seen.Count - 20)).ToArray());
+            }
+            catch { }
+            Notice("LoopMedic early warning: " + Current.cooler + " slowing down", Current.HealthText, false, ToolTipIcon.Warning);
+        }
+
+        public void Relearn()
+        {
+            string w = Current.cooler;
+            if (MessageBox.Show("Forget what LoopMedic has learned about your " + w + "'s normal speed and learn it again?\n\n" +
+                                "Use this after you change the " + w + " speed on purpose. Learning takes about 2 weeks, and early warnings " +
+                                "pause until then. Protection (power-off when the " + w + " stops or the CPU overheats) is not affected.",
+                                "LoopMedic", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (WriteControl("health-reset.json", "at", DateTime.Now, true)) Balloon("LoopMedic is learning your " + w + "'s normal speed again (about 2 weeks).");
+        }
+
         void Notify()
         {
             NotifyLastPowerOff();
+            if ((DateTime.Now - powerOffNoticeAt).TotalSeconds >= 15) NotifyHealth();
             if ((DateTime.Now - powerOffNoticeAt).TotalSeconds < 15) return;   // let that one be read first
             string s = Current.State;
             string problem;
@@ -732,7 +777,7 @@ namespace LoopMedicTray
                 // what's weakening the protection, if anything
                 if (st.Degraded.Count > 0)
                 {
-                    using (var ab = new SolidBrush(Theme.Amber))
+                    using (var ab = new SolidBrush(Theme.WarnText))
                     {
                         foreach (var line in st.Degraded)
                         {
@@ -775,7 +820,7 @@ namespace LoopMedicTray
                 }
                 if (st.LastPowerOffAt.HasValue)
                 {
-                    using (var ab = new SolidBrush(Theme.Amber))
+                    using (var ab = new SolidBrush(Theme.WarnText))
                     {
                         string lpx = "⚡ LoopMedic powered off this PC " + st.LastPowerOffAt.Value.ToString("MMM d, h:mm tt") + ": " + (st.LastPowerOffReason ?? "");
                         var box = new RectangleF(pad, y, W - pad * 2, 200 * S);
@@ -787,7 +832,7 @@ namespace LoopMedicTray
                 y += 4 * S;
                 if (st.State == "PAUSED" && st.PausedUntil.HasValue)
                 {
-                    using (var ab = new SolidBrush(Theme.Amber)) g.DrawString("Paused until " + st.PausedUntil.Value.ToString("t") + " - not protecting!", fSmall, ab, pad, y - 4 * S);
+                    using (var ab = new SolidBrush(Theme.WarnText)) g.DrawString("Paused until " + st.PausedUntil.Value.ToString("t") + " - not protecting!", fSmall, ab, pad, y - 4 * S);
                 }
 
                 // fans
@@ -799,7 +844,7 @@ namespace LoopMedicTray
                 foreach (var f in live)
                 {
                     string name = f.Name + (f.IsPump ? "  · " + st.Cooler : "");
-                    using (var nb = new SolidBrush(f.IsPump ? Theme.Green : Theme.Text)) g.DrawString(name, fSmall, nb, pad, y);
+                    using (var nb = new SolidBrush(f.IsPump ? Theme.Accent : Theme.Text)) g.DrawString(name, fSmall, nb, pad, y);
                     string r = f.Rpm.Value.ToString("N0") + " rpm";
                     var rs = g.MeasureString(r, fSmall);
                     g.DrawString(r, fSmall, bText, W - pad - rs.Width, y);
@@ -807,7 +852,7 @@ namespace LoopMedicTray
                     using (var bb = new SolidBrush(Theme.Card)) using (var bp = Theme.Rounded(bar, 2.5f * S)) g.FillPath(bb, bp);
                     var fill = new RectangleF(bar.X, bar.Y, (float)(bar.Width * f.Rpm.Value / maxRpm), bar.Height);
                     if (fill.Width > 5 * S)
-                        using (var fb = new SolidBrush(f.IsPump ? Theme.Green : Theme.Blue)) using (var fp = Theme.Rounded(fill, 2.5f * S)) g.FillPath(fb, fp);
+                        using (var fb = new SolidBrush(f.IsPump ? Theme.Accent : Theme.Accent2)) using (var fp = Theme.Rounded(fill, 2.5f * S)) g.FillPath(fb, fp);
                     y += 22 * S;
                 }
                 int empty = st.Fans.Count - live.Count;
@@ -862,11 +907,11 @@ namespace LoopMedicTray
             {
                 if (st.PumpRpm.Value <= st.PumpStoppedRpm.Value) return Theme.Red;       // stopped
                 if (st.PumpMinRpm.HasValue && st.PumpRpm.Value < st.PumpMinRpm.Value) return Theme.Amber;   // slow
-                return Theme.Green;
+                return Theme.Accent;
             }
             if (st.PumpMinRpm.HasValue && st.PumpRpm.Value < st.PumpMinRpm.Value) return Theme.Red;
             if (st.PumpMinRpm.HasValue && st.PumpRpm.Value < st.PumpMinRpm.Value * 2) return Theme.Amber;
-            return Theme.Green;
+            return Theme.Accent;
         }
         static Color CpuColor(Status st)
         {
@@ -874,7 +919,7 @@ namespace LoopMedicTray
             double lim = st.CpuMaxTemp.HasValue && st.CpuMaxTemp.Value > 0 ? st.CpuMaxTemp.Value : 95;
             if (st.CpuTemp.Value >= lim) return Theme.Red;
             if (st.CpuTemp.Value >= lim - 10) return Theme.Amber;
-            return Theme.Green;
+            return Theme.Accent;
         }
 
         void DrawMetric(Graphics g, ref float y, float pad, float W, string label, string value, string unit, Color c,
@@ -895,10 +940,10 @@ namespace LoopMedicTray
             var b = new Btn { Rect = r, Text = text, Click = click, Accent = accent };
             buttons.Add(b);
             bool hot = hover != null && hover.Text == text;
-            Color bg = accent ? Theme.Green : (hot ? Theme.CardHot : Theme.Card);
+            Color bg = accent ? Theme.Accent : (hot ? Theme.CardHot : Theme.Card);
             using (var bb = new SolidBrush(bg)) using (var p = Theme.Rounded(r, 6 * S)) g.FillPath(bb, p);
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            using (var tb = new SolidBrush(accent ? Theme.On(Theme.Green) : Theme.Text)) g.DrawString(text, f, tb, r, sf);
+            using (var tb = new SolidBrush(accent ? Theme.On(Theme.Accent) : Theme.Text)) g.DrawString(text, f, tb, r, sf);
         }
     }
 
@@ -1051,13 +1096,13 @@ namespace LoopMedicTray
             var notes = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
                                       BackColor = Theme.Card, ForeColor = Theme.Text, Text = Clean(rel.Notes), TabStop = false,
                                       Location = new Point(pad, pad + (int)(80 * S)), Size = new Size(w, (int)(150 * S)) };
-            var link = new LinkLabel { Text = "Full changelog on GitHub", LinkColor = Theme.Link, ActiveLinkColor = Theme.Blue, VisitedLinkColor = Theme.Link,
+            var link = new LinkLabel { Text = "Full changelog on GitHub", LinkColor = Theme.Link, ActiveLinkColor = Theme.Accent2, VisitedLinkColor = Theme.Link,
                                        LinkBehavior = LinkBehavior.HoverUnderline, AutoSize = true, Location = new Point(pad, pad + (int)(238 * S)) };
             link.LinkClicked += delegate { try { Process.Start(rel.PageUrl); } catch { } };
             status = new Label { ForeColor = Theme.Dim, Location = new Point(pad, pad + (int)(258 * S)), Size = new Size(w, (int)(18 * S)) };
             int bh = (int)(32 * S), bw = (int)(120 * S), by = ClientSize.Height - pad - bh;
             bLater = Flat("Later", Theme.Card, new Rectangle(ClientSize.Width - pad - bw, by, bw, bh));
-            bUpdate = Flat("Update now", Theme.Blue, new Rectangle(ClientSize.Width - pad - bw * 2 - (int)(8 * S), by, bw, bh));
+            bUpdate = Flat("Update now", Theme.Accent2, new Rectangle(ClientSize.Width - pad - bw * 2 - (int)(8 * S), by, bw, bh));
             bLater.Click += delegate { Close(); };
             bUpdate.Click += delegate { StartUpdate(); };
             Controls.AddRange(new Control[] { title, sub, head, notes, link, status, bUpdate, bLater });
@@ -1095,7 +1140,7 @@ namespace LoopMedicTray
                 }
                 catch (Exception ex)
                 {
-                    app.RunOnUi(delegate { status.Text = ex.Message; status.ForeColor = Theme.Amber; bUpdate.Enabled = bLater.Enabled = true; });
+                    app.RunOnUi(delegate { status.Text = ex.Message; status.ForeColor = Theme.WarnText; bUpdate.Enabled = bLater.Enabled = true; });
                 }
             }) { IsBackground = true }.Start();
         }
@@ -1112,7 +1157,7 @@ namespace LoopMedicTray
             catch (System.ComponentModel.Win32Exception)
             {
                 status.Text = "Update cancelled - Windows didn't get admin permission.";
-                status.ForeColor = Theme.Amber;
+                status.ForeColor = Theme.WarnText;
                 bUpdate.Enabled = bLater.Enabled = true;
             }
         }
