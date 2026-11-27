@@ -108,6 +108,33 @@ Copy-Item $limits $Dest -Force
 Copy-Item (Join-Path $lhmFrom '*.dll') "$Dest\lhm" -Force
 & icacls.exe $Dest /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null
 
+# ---- mail.json: email alerts (optional). Setup may have made one next to this script; otherwise a switched-off
+#      template is written once and then left alone (updates keep your mail settings). The watchdog encrypts a
+#      typed-in password as soon as it sees it, and locks the file to SYSTEM + Administrators.
+$mailDest = Join-Path $Dest 'mail.json'
+$mailNew = Join-Path $Src 'mail.json'
+if (Test-Path $mailNew) {
+    Copy-Item $mailNew $mailDest -Force
+    Remove-Item $mailNew -Force -ErrorAction SilentlyContinue
+} elseif (-not (Test-Path $mailDest)) {
+    @'
+{
+  "_read_me": "LoopMedic email alerts (optional). Fill in your mail server, set Enabled to true and save. Open this file in Notepad run as administrator. LoopMedic picks up the change within seconds - no restart. Type the password as plain text: LoopMedic encrypts it as soon as it sees it, and only this PC can read it back. Then right-click the tray icon > Send a test email.",
+  "_security": "starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.",
+  "_tip": "Gmail, Outlook and most big providers need an app password here, not your normal password. To = one address, or several separated by commas.",
+  "Enabled": false,
+  "Server": "smtp.example.com",
+  "Port": 587,
+  "Security": "starttls",
+  "Username": "",
+  "Password": "",
+  "From": "",
+  "To": ""
+}
+'@ | Set-Content $mailDest -Encoding UTF8
+}
+& icacls.exe $mailDest /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' | Out-Null
+
 # control\ is the one folder users may write: the tray app drops pause/test/cancel requests here.
 # The watchdog only ever reads dates out of these files.
 New-Item -ItemType Directory -Force "$Dest\control" | Out-Null

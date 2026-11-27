@@ -16,7 +16,7 @@ if (-not $LhmDir) {
 if (-not $LhmDir) { throw 'LibreHardwareMonitorLib.dll not found (pass -LhmDir).' }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $fw = Split-Path $csc
-$common = @('/nologo', '/optimize+', '/r:System.dll', '/r:System.Core.dll', '/r:System.Web.Extensions.dll')
+$common = @('/nologo', '/optimize+', '/r:System.dll', '/r:System.Core.dll', '/r:System.Web.Extensions.dll', '/r:System.Security.dll')
 
 $out1 = Join-Path $OutDir 'LoopMedic.exe'
 & $csc @common '/target:exe' "/out:$out1" "/r:$(Join-Path $LhmDir 'LibreHardwareMonitorLib.dll')" "/r:$(Join-Path $fw 'netstandard.dll')" (Join-Path $here 'src\LoopMedic.cs')

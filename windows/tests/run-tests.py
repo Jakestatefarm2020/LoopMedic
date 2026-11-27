@@ -7,7 +7,7 @@ Every run is a dry run. Needs: Python 3.8+, a built bin\\LoopMedic.exe (run buil
     python tests\\run-tests.py            all scenarios (in parallel, ~2.5 min)
     python tests\\run-tests.py spike cancel   only the ones whose names contain these words
 """
-import json, os, shutil, subprocess, sys, tempfile, threading, time
+import json, os, shutil, socket, socketserver, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -414,6 +414,138 @@ def t_health_samples_and_relearn():
     if lines:
         s = json.loads(lines[-1])
         expect("all" in s["bands"] and abs(s["bands"]["all"][0] - 2400) < 1, f"sample = median rpm of the window ({s})", p)
+    return p
+
+
+class FakeSmtp:
+    """A tiny local mail server (plain SMTP, accepts any login) that keeps what it receives."""
+
+    def __init__(self):
+        self.mails, self.logins = [], []
+        box = self
+
+        class H(socketserver.StreamRequestHandler):
+            def handle(self):
+                def say(t):
+                    self.wfile.write((t + "\r\n").encode())
+                say("220 fake ESMTP")
+                data, in_data, auth = [], False, None
+                while True:
+                    raw = self.rfile.readline()
+                    if not raw:
+                        return
+                    line = raw.decode(errors="replace").rstrip("\r\n")
+                    if in_data:
+                        if line == ".":
+                            in_data = False; box.mails.append("\n".join(data)); data = []; say("250 queued")
+                        else:
+                            data.append(line[1:] if line.startswith("..") else line)
+                        continue
+                    if auth:
+                        box.logins.append(line); auth -= 1
+                        say("334 UGFzc3dvcmQ6" if auth else "235 ok")
+                        continue
+                    cmd = line.upper()
+                    if cmd.startswith("EHLO"):
+                        self.wfile.write(b"250-fake\r\n250 AUTH LOGIN\r\n")
+                    elif cmd.startswith("AUTH LOGIN"):
+                        parts = line.split()
+                        if len(parts) > 2:      # user name sent with the command
+                            box.logins.append(parts[2]); auth = 1; say("334 UGFzc3dvcmQ6")
+                        else:
+                            auth = 2; say("334 VXNlcm5hbWU6")
+                    elif cmd == "DATA":
+                        in_data = True; say("354 go")
+                    elif cmd == "QUIT":
+                        say("221 bye"); return
+                    else:
+                        say("250 ok")
+
+        self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def subjects(self):
+        return [l for m in self.mails for l in m.split("\n") if l.lower().startswith("subject:")]
+
+
+def free_port():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close()
+    return p
+
+
+def mail_json(port, enabled=True):
+    return {"Enabled": enabled, "Server": "127.0.0.1", "Port": port, "Security": "none", "Username": "alerts@example.com",
+            "Password": "hunter2-test", "From": "alerts@example.com", "To": "me@example.com"}
+
+
+def t_mail_on_trip_password_encrypted():
+    smtp = FakeSmtp()
+    r = Rig("mail_trip", temp=88)
+    r.write_json("mail.json", mail_json(smtp.port))
+    r.start(duration=24)
+    time.sleep(7); r.push(pump=0)
+    r.wait(); log = r.log(); p = []
+    with open(os.path.join(r.root, "mail.json"), encoding="utf-8") as f:
+        m = json.load(f)
+    expect(m.get("Password") == "" and len(m.get("PasswordProtected", "")) > 40, f"password encrypted in mail.json ({m.get('Password')!r})", p)
+    expect("hunter2-test" not in open(os.path.join(r.root, "mail.json"), encoding="utf-8").read(), "no plain-text password left", p)
+    expect("Email alerts on" in log, "mail switched on at start", p)
+    expect(any("POWERING OFF" in s for s in smtp.subjects()), f"power-off email received ({smtp.subjects()})", p)
+    expect("WOULD POWER OFF NOW" in log, "the power-off still happened", p)
+    return p
+
+
+def t_mail_reload_bad_json_and_warning():
+    smtp = FakeSmtp()
+    r = Rig("mail_reload")
+    r.write_json("mail.json", mail_json(smtp.port, enabled=False))
+    r.start(duration=40)
+    time.sleep(5)
+    r.write_json("mail.json", mail_json(smtp.port))                 # switched on while running: no restart
+    time.sleep(6)
+    with open(os.path.join(r.root, "mail.json"), "w", encoding="utf-8") as f:
+        f.write('{ "Enabled": true, "Server": ')                    # a broken save
+    time.sleep(5)
+    r.push(pump=400)                                                 # slow pump -> warning email
+    r.wait(); log = r.log(); p = []
+    expect("Email alerts on" in log, "change picked up without a restart", p)
+    expect("has a mistake" in log, "broken mail.json logged", p)
+    expect(any("Warning" in s and "slower" in s for s in smtp.subjects()), f"warning email still sent with the old settings ({smtp.subjects()})", p)
+    return p
+
+
+def t_mail_test_email():
+    smtp = FakeSmtp()
+    a = Rig("mail_test_cmd"); a.write_json("mail.json", mail_json(smtp.port))
+    out = subprocess.run([EXE, "--test-mail", "--root", a.root, "--no-eventlog"], capture_output=True, text=True, timeout=60)
+    b = Rig("mail_test_tray"); b.write_json("mail.json", mail_json(smtp.port))
+    b.start(duration=12)
+    time.sleep(5); b.control("mail-test.json", "at", datetime.now())
+    time.sleep(3); st = b.status()
+    b.wait(); p = []
+    expect(out.returncode == 0 and "Test email sent" in out.stdout, f"--test-mail sends at once ({out.returncode}: {out.stdout.strip()})", p)
+    expect(st.get("mail") is True, "status tells the tray mail is on", p)
+    expect("Test email requested from the tray" in b.log(), "tray request handled", p)
+    expect(sum("test email" in s for s in smtp.subjects()) == 2, f"two test emails received ({smtp.subjects()})", p)
+    return p
+
+
+def t_mail_server_down_never_delays_power_off():
+    r = Rig("mail_down", temp=88)
+    r.write_json("mail.json", mail_json(free_port()))               # nothing listening there
+    r.start(duration=24)
+    time.sleep(7); r.push(pump=0)
+    r.wait(); log = r.log(); p = []
+
+    def at(text):
+        line = next((l for l in log.splitlines() if text in l), None)
+        return datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S") if line else None
+    t0, t1 = at("would power off in 5s"), at("WOULD POWER OFF NOW")
+    took = (t1 - t0).total_seconds() if t0 and t1 else 999
+    expect(took <= 6, f"5 s countdown kept with the mail server down ({took} s)", p)
+    expect("Mail: not sent" in log, "failed send logged", p)
     return p
 
 

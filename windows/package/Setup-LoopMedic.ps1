@@ -25,7 +25,7 @@ try {
     Write-Host 'by Jacob Stiltner' -ForegroundColor DarkGray
 
     # ---------------------------------------------------------------- 1
-    Show-Step '1/5  Preparing files'
+    Show-Step '1/6  Preparing files'
     Get-ChildItem $here -Recurse -File | Unblock-File
     Write-Host 'Files unblocked (Windows marks downloaded files as untrusted).'
     # Built here, from the source in src\ and tray\, with the C# compiler that's part of Windows:
@@ -39,7 +39,7 @@ try {
     Write-Host 'Built bin\LoopMedic.exe and bin\LoopMedicTray.exe.' -ForegroundColor Green
 
     # ---------------------------------------------------------------- 2
-    Show-Step '2/5  Sensor driver (PawnIO)'
+    Show-Step '2/6  Sensor driver (PawnIO)'
     $pawn = Get-PawnIO
     if ($pawn) {
         Write-Host "PawnIO $($pawn.DisplayVersion) is installed." -ForegroundColor Green
@@ -80,7 +80,7 @@ try {
     }
 
     # ---------------------------------------------------------------- 3
-    Show-Step '3/5  Your CPU cooler'
+    Show-Step '3/6  Your CPU cooler'
     Add-Type -Path (Join-Path $here 'lhm\LibreHardwareMonitorLib.dll')
     $c = New-Object LibreHardwareMonitor.Hardware.Computer
     $c.IsCpuEnabled = $true
@@ -229,7 +229,7 @@ try {
     }
 
     # ---------------------------------------------------------------- 4
-    Show-Step '4/5  CPU temperature limit'
+    Show-Step '4/6  CPU temperature limit'
     # The same table the watchdog uses (cpu-limits.json): trip = max temp - 5 C, or the max itself held
     # longer for chips designed to sit at their limit. The temperature check can't be switched off.
     $limits = Get-Content (Join-Path $here 'cpu-limits.json') -Raw | ConvertFrom-Json
@@ -307,7 +307,61 @@ try {
     Write-Host "Saved: $what = $(if ($pump) { "$($pump.Name) [$($cfg.PumpSensorId)]" } else { 'none (temperature only)' }), CPU limit = $(if ($maxTemp -gt 0) { "$maxTemp C" } else { 'none' })" -ForegroundColor Green
 
     # ---------------------------------------------------------------- 5
-    Show-Step '5/5  Safe test, then install'
+    Show-Step '5/6  Email alerts (optional)'
+    $mailLive = 'C:\ProgramData\LoopMedic\mail.json'
+    $mailHere = Join-Path $here 'mail.json'
+    Remove-Item $mailHere -Force -ErrorAction SilentlyContinue
+    $mailOld = $null
+    try { if (Test-Path $mailLive) { $mailOld = Get-Content $mailLive -Raw | ConvertFrom-Json } } catch { }
+    Write-Host 'LoopMedic can email you when it powers this PC off, when a warning starts or clears, and if its self-test fails.'
+    Write-Host 'This needs a mail server you can send through (SMTP), e.g. your email provider''s, with an app password.'
+    $askMail = if ($mailOld -and $mailOld.Enabled) { "Email alerts are already on (to $($mailOld.To)). Change them?" }
+               else { "Set up a mail server for alerts? You can do this later by editing $mailLive" }
+    if (Read-YesNo $askMail) {
+        Add-Type -AssemblyName System.Security
+        while ($true) {
+            $server = (Read-Host 'Mail server (e.g. smtp.gmail.com)').Trim()
+            $portIn = (Read-Host 'Port (Enter = 587)').Trim()
+            $port = 587; if ($portIn) { [void][int]::TryParse($portIn, [ref]$port) }
+            if ($port -eq 465) { Write-Host 'Port 465 (SSL) is not supported - most providers also offer 587.' -ForegroundColor Yellow; $port = 587 }
+            $security = if ($port -eq 25 -and -not (Read-YesNo 'Use encryption (STARTTLS)? Say N only for a local relay')) { 'none' } else { 'starttls' }
+            $user = (Read-Host 'User name (usually your email address)').Trim()
+            $sec = Read-Host 'Password or app password (hidden)' -AsSecureString
+            $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+            $to = (Read-Host "Send alerts to (Enter = $user)").Trim(); if (-not $to) { $to = $user }
+            # encrypted for this PC only (the same way LoopMedic does it), so no plain password is ever written
+            $prot = ''
+            if ($plain) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($plain)
+                $prot = [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($bytes, [Text.Encoding]::UTF8.GetBytes('LoopMedic mail v1'), 'LocalMachine'))
+            }
+            $plain = $null
+            $mail = [ordered]@{
+                _read_me = 'LoopMedic email alerts. Edit in Notepad run as administrator; LoopMedic picks up changes within seconds. To change the password, type it into Password as plain text - LoopMedic encrypts it straight away.'
+                _security = 'starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.'
+                Enabled = $true; Server = $server; Port = $port; Security = $security; Username = $user; Password = ''
+                PasswordProtected = $prot; From = $user; To = $to }
+            $mail | ConvertTo-Json | Set-Content $mailHere -Encoding UTF8
+            Write-Host 'Sending a test email...'
+            $mailTest = Join-Path ([IO.Path]::GetTempPath()) ('LoopMedic-mail-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Force $mailTest | Out-Null
+            Copy-Item $mailHere $mailTest
+            $res = & (Join-Path $here 'bin\LoopMedic.exe') --test-mail --root $mailTest --no-eventlog 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+            Remove-Item $mailTest -Recurse -Force -ErrorAction SilentlyContinue
+            $res | ForEach-Object { Write-Host "  $_" }
+            if ($code -eq 0) { Write-Host 'Check your inbox (and spam folder). Email alerts will be on after install.' -ForegroundColor Green; break }
+            if (-not (Read-YesNo 'That did not work. Enter the settings again?')) {
+                Write-Host "Kept anyway - fix them later in $mailLive (the reason is above)." -ForegroundColor Yellow
+                break
+            }
+        }
+    } else {
+        Write-Host "Skipped. To set it up later, edit $mailLive (as administrator) and set Enabled to true."
+    }
+
+    # ---------------------------------------------------------------- 6
+    Show-Step '6/6  Safe test, then install'
     # The test runs in its own temp folder, so nothing is left behind here.
     $guard = Join-Path $here 'bin\LoopMedic.exe'
     $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('LoopMedic-setup-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -343,6 +397,7 @@ try {
         Write-Host 'Click it for live pump / CPU / fan readings; right-click > Run test to see the alarm pop-up.'
         Write-Host 'Log: C:\ProgramData\LoopMedic\loopmedic.log'
     } else {
+        Remove-Item (Join-Path $here 'mail.json') -Force -ErrorAction SilentlyContinue
         Write-Host 'Not installed. Run Install.bat again whenever you are ready.'
     }
     Exit-Setup 0

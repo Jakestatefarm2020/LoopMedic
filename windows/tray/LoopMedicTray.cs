@@ -75,7 +75,8 @@ namespace LoopMedicTray
         public double? PumpRpm, CpuTemp, PumpMinRpm, PumpStoppedRpm, CpuMaxTemp, DayMaxTemp, DayMinPump;
         public DateTime? LastPowerOffAt, SelfTestAt;
         public string LastPowerOffReason;
-        public string HealthId, HealthText;   // early warning (pump slowing down): a notification only, never drawn in the panel
+        public string HealthId, HealthText;
+        public bool MailOn;   // early warning (pump slowing down): a notification only, never drawn in the panel
         public bool SelfTestOk;
         public string CpuName = "";
         public DateTime? PausedUntil, TripDeadline;
@@ -131,6 +132,8 @@ namespace LoopMedicTray
                     var lp = (Dictionary<string, object>)sub;
                     st.LastPowerOffAt = Date(lp, "at"); st.LastPowerOffReason = Str(lp, "reason");
                 }
+                object mo;
+                st.MailOn = d.TryGetValue("mail", out mo) && mo is bool && (bool)mo;
                 if (d.TryGetValue("healthWarning", out sub) && sub is Dictionary<string, object>)
                 {
                     var hw = (Dictionary<string, object>)sub;
@@ -304,7 +307,7 @@ namespace LoopMedicTray
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly Dictionary<string, Icon> icons = new Dictionary<string, Icon>();
         readonly ContextMenuStrip menu = new ContextMenuStrip();
-        readonly ToolStripMenuItem miPause, miTest, miThemes, miRelearn;
+        readonly ToolStripMenuItem miPause, miTest, miThemes, miRelearn, miMail;
         public readonly List<double> PumpHist = new List<double>(), CpuHist = new List<double>();
         public Status Current = new Status();
         DateTime lastAt = DateTime.MinValue, lastHeartbeat = DateTime.MinValue;
@@ -335,6 +338,10 @@ namespace LoopMedicTray
             menu.Items.Add(miThemes);
             miRelearn = new ToolStripMenuItem("Relearn normal pump speed", null, delegate { Relearn(); });
             menu.Items.Add(miRelearn);
+            miMail = new ToolStripMenuItem("Send a test email", null, delegate {
+                if (WriteControl("mail-test.json", "at", DateTime.Now, true)) Balloon("Test email on its way - check your inbox (and spam) in a minute.");
+            });
+            menu.Items.Add(miMail);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit tray icon (protection keeps running)", null, delegate { ExitApp(); });
             menu.Opening += delegate
@@ -342,6 +349,7 @@ namespace LoopMedicTray
                 miPause.Text = Current.State == "PAUSED" ? "Resume protection" : "Pause 30 min";
                 foreach (ToolStripMenuItem t in miThemes.DropDownItems) t.Checked = t.Text == Theme.Name;
                 miRelearn.Text = "Relearn normal " + Current.cooler + " speed";
+                miMail.Visible = Current.MailOn;   // only once email alerts are set up (mail.json)
             };
 
             ni.ContextMenuStrip = menu;

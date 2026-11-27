@@ -23,6 +23,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -41,7 +42,7 @@ namespace LoopMedic
     // ------------------------------------------------------------------ options
     class Options
     {
-        public string Mode = "supervise";     // supervise | worker | poweroff
+        public string Mode = "supervise";     // supervise | worker | poweroff | testmail
         public string Root;
         public bool DryRun, Once, NoEventLog, SelfTestRun;
         public int Duration, SimulateStall, SimulateHealthy, Delay = 30, CrashAfter, HangAfter, Parent;
@@ -66,6 +67,7 @@ namespace LoopMedic
                     case "--parent": o.Parent = ParseInt(next()); pass = false; break;
                     case "--root": o.Root = next(); o.PassThrough.Add(k); o.PassThrough.Add(o.Root); pass = false; break;
                     case "--dry-run": o.DryRun = true; break;
+                    case "--test-mail": o.Mode = "testmail"; pass = false; break;
                     case "--once": o.Once = true; break;
                     case "--no-eventlog": o.NoEventLog = true; break;
                     case "--self-test": o.SelfTestRun = true; break;
@@ -106,6 +108,7 @@ namespace LoopMedic
             try
             {
                 if (Opt.Mode == "poweroff") return PowerOff.Run(Opt);
+                if (Opt.Mode == "testmail") return Mail.TestNow(Paths.Root);
                 if (Opt.Mode == "worker" || Opt.Once) return Watchdog.Run(Opt);
                 return Supervisor.Run(Opt);
             }
@@ -482,6 +485,244 @@ namespace LoopMedic
             }
         }
         public void Close() { try { computer.Close(); } catch { } }
+    }
+
+    // ------------------------------------------------------------------ email alerts (optional, your own mail server)
+    // mail.json next to config.json: off until "Enabled": true. Windows tells us when the file changes (no polling;
+    // plus a cheap date check once a minute in case a change notice was missed). A plain-text password is encrypted
+    // straight away (Windows DPAPI, this PC only) and the file is locked to SYSTEM + Administrators. A broken file is
+    // logged and the previous settings stay in use. Emails are sent from a background thread with short timeouts:
+    // a slow or dead mail server can never delay a trip or a power-off.
+    static class Mail
+    {
+        class Settings { public string Server, Security, User, Password, From, To; public int Port; }
+        class Msg { public string Subject, Body; public bool Important; public int Attempt; public double NotBefore; }
+
+        static readonly byte[] Entropy = Encoding.UTF8.GetBytes("LoopMedic mail v1");
+        static string path;
+        static Settings cur;
+        static string curSig = "";
+        static volatile bool changed;
+        static double changedAt, lastDateCheck;
+        static DateTime lastWrite = DateTime.MinValue;
+        static FileSystemWatcher watcher;
+        static readonly List<Msg> queue = new List<Msg>();
+        static readonly AutoResetEvent wake = new AutoResetEvent(false);
+        static readonly List<double> sentTimes = new List<double>();
+
+        public static void Start(string root)
+        {
+            path = Path.Combine(root, "mail.json");
+            Load();
+            try
+            {
+                watcher = new FileSystemWatcher(root, "mail.json") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.CreationTime };
+                FileSystemEventHandler h = delegate { changed = true; changedAt = Clock.Mono; };
+                watcher.Changed += h; watcher.Created += h; watcher.Deleted += h;
+                watcher.Renamed += delegate { changed = true; changedAt = Clock.Mono; };
+                watcher.EnableRaisingEvents = true;
+            }
+            catch (Exception e) { Log.Write("Mail: can't watch mail.json for changes (" + e.Message + ") - it is checked once a minute instead."); }
+            new Thread(Sender) { IsBackground = true, Name = "mail" }.Start();
+        }
+
+        // Called every poll: reload ~2 s after a change (the editor has finished saving), or when the once-a-minute
+        // date check sees a change the watcher missed.
+        public static void Poll(double now)
+        {
+            if (path == null) return;
+            if (changed && now - changedAt >= 2) { changed = false; Load(); }
+            else if (now - lastDateCheck >= 60)
+            {
+                lastDateCheck = now;
+                DateTime w = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+                if (w != lastWrite) Load();
+            }
+        }
+
+        public static bool On { get { return cur != null; } }
+
+        public static void Send(string subject, string body, bool important)
+        {
+            if (cur == null) return;
+            lock (queue) queue.Add(new Msg { Subject = "LoopMedic (" + Environment.MachineName + "): " + subject, Body = body, Important = important });
+            wake.Set();
+        }
+
+        static void Load()
+        {
+            DateTime w = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+            lastWrite = w;
+            if (w == DateTime.MinValue) { Set(null, "mail.json not found - email alerts off."); return; }
+            Dictionary<string, object> d = null;
+            for (int i = 0; i < 3 && d == null; i++)   // the editor may still hold the file for a moment
+            {
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (fi.Length > 64 * 1024) { Log.Write("Mail: mail.json is too big - keeping the previous mail settings."); return; }
+                    d = Json.Ser.DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>;
+                    if (d == null) throw new Exception("not a JSON object");
+                }
+                catch (IOException) { Thread.Sleep(300); }
+                catch (Exception e) { Log.Write("Mail: mail.json has a mistake (" + e.Message + ") - keeping the previous mail settings. Fix the file and save it again."); return; }
+            }
+            if (d == null) { Log.Write("Mail: couldn't read mail.json (in use) - will try again."); changed = true; changedAt = Clock.Mono; return; }
+
+            // A plain-text password is encrypted at once (this PC only), and the file locked to SYSTEM + Administrators.
+            string plain = Json.Str(d, "Password") ?? "";
+            if (plain.Length > 0)
+            {
+                try
+                {
+                    byte[] enc = System.Security.Cryptography.ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), Entropy, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                    d["Password"] = "";
+                    d["PasswordProtected"] = Convert.ToBase64String(enc);
+                    WritePretty(d);
+                    lastWrite = File.GetLastWriteTimeUtc(path);
+                    Log.Write("Mail: password encrypted in mail.json (only this PC can read it).");
+                }
+                catch (Exception e) { Log.Write("Mail: couldn't encrypt the password in mail.json (" + e.Message + ")."); }
+            }
+            Lock();
+
+            if (!Json.Bool(d, "Enabled")) { Set(null, "Email alerts off (mail.json: \"Enabled\": false)."); return; }
+            var s = new Settings
+            {
+                Server = (Json.Str(d, "Server") ?? "").Trim(), Port = (int)(Json.Num(d, "Port") ?? 587),
+                Security = (Json.Str(d, "Security") ?? "starttls").Trim().ToLowerInvariant(),
+                User = (Json.Str(d, "Username") ?? "").Trim(), From = (Json.Str(d, "From") ?? "").Trim(), To = (Json.Str(d, "To") ?? "").Trim()
+            };
+            if (s.From.Length == 0) s.From = s.User;
+            string prot = Json.Str(d, "PasswordProtected") ?? "";
+            if (prot.Length > 0)
+            {
+                try { s.Password = Encoding.UTF8.GetString(System.Security.Cryptography.ProtectedData.Unprotect(Convert.FromBase64String(prot), Entropy, System.Security.Cryptography.DataProtectionScope.LocalMachine)); }
+                catch { Log.Write("Mail: the saved password can't be read on this PC - type it into mail.json again (\"Password\": \"...\")."); }
+            }
+            string problem = null;
+            if (s.Server.Length == 0) problem = "\"Server\" is empty";
+            else if (s.Port < 1 || s.Port > 65535) problem = "\"Port\" must be 1-65535";
+            else if (s.To.Length == 0 || s.From.Length == 0) problem = "\"To\" and \"From\" (or \"Username\") are needed";
+            else if (s.Security == "ssl" || s.Port == 465) problem = "port 465 / \"ssl\" isn't supported - use port 587 with \"Security\": \"starttls\"";
+            else if (s.Security != "starttls" && s.Security != "none") problem = "\"Security\" must be \"starttls\" or \"none\"";
+            if (problem != null) { Log.Write("Mail: mail.json - " + problem + ". Keeping the previous mail settings."); return; }
+            Set(s, "Email alerts on: to " + s.To + " via " + s.Server + ":" + s.Port + " (" + s.Security + ").");
+        }
+
+        static void Set(Settings s, string line)
+        {
+            string sig = s == null ? "" : s.Server + "|" + s.Port + "|" + s.Security + "|" + s.User + "|" + s.From + "|" + s.To + "|" + (s.Password ?? "").GetHashCode();
+            if (sig == curSig && (s != null) == (cur != null)) { cur = s; return; }
+            bool wasOn = cur != null;
+            cur = s; curSig = sig;
+            if (s != null || wasOn) Log.Write("Mail: " + (wasOn && s != null ? "settings updated. " : "") + line);
+        }
+
+        static void Lock()
+        {
+            if (FakeSensors.Active) return;   // tests run unelevated against their own folder
+            try
+            {
+                var sec = new System.Security.AccessControl.FileSecurity();
+                sec.SetAccessRuleProtection(true, false);
+                foreach (var sid in new[] { System.Security.Principal.WellKnownSidType.LocalSystemSid, System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid })
+                    sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(new System.Security.Principal.SecurityIdentifier(sid, null),
+                        System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+                File.SetAccessControl(path, sec);
+            }
+            catch { }
+        }
+
+        static void WritePretty(Dictionary<string, object> d)
+        {
+            var sb = new StringBuilder("{\r\n");
+            int i = 0;
+            foreach (var kv in d)
+                sb.Append("  ").Append(Json.Ser.Serialize(kv.Key)).Append(": ").Append(Json.Ser.Serialize(kv.Value)).Append(++i < d.Count ? ",\r\n" : "\r\n");
+            sb.Append("}\r\n");
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, sb.ToString());
+            if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path);
+        }
+
+        static void SendNow(Settings s, Msg m)
+        {
+            using (var c = new System.Net.Mail.SmtpClient(s.Server, s.Port) { EnableSsl = s.Security == "starttls", Timeout = 20000, DeliveryMethod = System.Net.Mail.SmtpDeliveryMethod.Network })
+            using (var msg = new System.Net.Mail.MailMessage { From = new System.Net.Mail.MailAddress(s.From), Subject = m.Subject, Body = m.Body })
+            {
+                if (s.User.Length > 0) c.Credentials = new NetworkCredential(s.User, s.Password ?? "");
+                foreach (string to in s.To.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)) msg.To.Add(to.Trim());
+                c.Send(msg);
+            }
+        }
+
+        static string TestBody()
+        {
+            return "This is a test email from LoopMedic on " + Environment.MachineName + ".\r\n\r\nEmail alerts work. You'll get an email when LoopMedic " +
+                   "is about to power this PC off, when it's back on after that, when a warning starts or clears, and if the monthly self-test fails.";
+        }
+
+        // LoopMedic.exe --test-mail [--root <folder>]: send one test email now, using <folder>\mail.json. Exit 0 = sent.
+        public static int TestNow(string root)
+        {
+            path = Path.Combine(root, "mail.json");
+            Load();
+            if (cur == null) { Console.WriteLine("Email alerts are off or mail.json has a problem - see the last lines of loopmedic.log."); return 2; }
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            try
+            {
+                SendNow(cur, new Msg { Subject = "LoopMedic (" + Environment.MachineName + "): test email", Body = TestBody() });
+                Console.WriteLine("Test email sent to " + cur.To + ".");
+                return 0;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Couldn't send: " + e.Message + (e.InnerException != null ? " / " + e.InnerException.Message : ""));
+                return 1;
+            }
+        }
+
+        // The tray's "Send a test email" (control\mail-test.json).
+        public static void SendTest() { Send("test email", TestBody(), true); }
+
+        static void Sender()
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;   // TLS 1.2
+            while (true)
+            {
+                wake.WaitOne(TimeSpan.FromSeconds(10));
+                while (true)
+                {
+                    Msg m = null;
+                    double now = Clock.Mono;
+                    lock (queue) { m = queue.FirstOrDefault(x => x.NotBefore <= now); if (m != null) queue.Remove(m); }
+                    if (m == null) break;
+                    var s = cur;
+                    if (s == null) continue;
+                    sentTimes.RemoveAll(t => now - t > 3600);
+                    if (!m.Important && sentTimes.Count >= 6) { Log.Write("Mail: more than 6 emails this hour - not sending \"" + m.Subject + "\"."); continue; }
+                    try
+                    {
+                        SendNow(s, m);
+                        sentTimes.Add(now);
+                        Log.Write("Mail: sent \"" + m.Subject + "\".");
+                    }
+                    catch (Exception e)
+                    {
+                        string why = e.InnerException != null ? e.Message + " / " + e.InnerException.Message : e.Message;
+                        int max = m.Important ? 5 : 2;   // important ones keep trying for ~15 min (e.g. the network is still starting after a power-off)
+                        if (++m.Attempt < max)
+                        {
+                            m.NotBefore = now + 30 * Math.Pow(2, m.Attempt - 1);
+                            lock (queue) queue.Add(m);
+                            Log.Write("Mail: not sent (" + why + ") - trying again in " + (int)(m.NotBefore - now) + " s.");
+                        }
+                        else Log.Write("Mail: not sent (" + why + ") - giving up on \"" + m.Subject + "\".");
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ early warning: a pump slowing down
@@ -879,6 +1120,9 @@ namespace LoopMedic
                 return 0;
             }
 
+            // ---- email alerts (optional: mail.json) ----
+            Mail.Start(Paths.Root);
+
             // ---- why did the PC turn off last time? ----
             Dictionary<string, object> lastOff = Json.ReadFile(Paths.LastPowerOff, 16 * 1024);
             if (lastOff != null && !Json.Bool(lastOff, "reported"))
@@ -886,6 +1130,8 @@ namespace LoopMedic
                 string msg = "Last power-off by LoopMedic: " + Json.Str(lastOff, "at") + " - " + Json.Str(lastOff, "reason");
                 Log.Write(msg);
                 Events.Warn(Events.LastPowerOff, msg);
+                Mail.Send("PC back on after a power-off", "This PC is running again after LoopMedic powered it off.\r\n\r\n" + msg +
+                          "\r\n\r\nFind out why before running anything heavy. The log is C:\\ProgramData\\LoopMedic\\loopmedic.log.", true);
                 lastOff["reported"] = true;
                 try { Json.WriteAtomic(Paths.LastPowerOff, lastOff); } catch { }
             }
@@ -915,10 +1161,12 @@ namespace LoopMedic
             // early warning (a pump slowing down over days): only with a real pump/fan sensor, never in simulations
             HealthTracker health = pump != null && !simulating
                 ? new HealthTracker(Paths.Root, pw, Cfg("HealthSampleMinutes", 20), Cfg("HealthLearnDays", 14), Cfg("HealthRecentDays", 3),
-                                    Cfg("HealthWarnPercent", 12), (int)Cfg("HealthMinReadings", 60), null)
+                                    Cfg("HealthWarnPercent", 12), (int)Cfg("HealthMinReadings", 60),
+                                    (kind, text) => Mail.Send(kind == "warn" ? "Early warning: " + pw + " slowing down" : pw + " speed back to normal", text, false))
                 : null;
             if (health != null) health.Analyze(Clock.Now);
             double lastWakeMono = started;
+            DateTime lastMailTest = Clock.Now;   // only requests made after this start count
 
             while (true)
             {
@@ -1035,7 +1283,11 @@ namespace LoopMedic
                     lastCancelHandled = cancelAt.Value;
                     if (trip.Kind != "test" && !o.DryRun) Run("shutdown.exe", "/a");   // also stop the backup shutdown
                     Log.Write("Power-off CANCELLED from the tray pop-up (" + trip.Reason + "). Re-arming in " + F(rearmSeconds) + "s.");
-                    if (trip.Kind != "test") Events.Info(Events.Cancelled, "Power-off cancelled by the user (" + trip.Reason + ").");
+                    if (trip.Kind != "test")
+                    {
+                        Events.Info(Events.Cancelled, "Power-off cancelled by the user (" + trip.Reason + ").");
+                        Mail.Send("Power-off cancelled", "Someone at the PC cancelled the power-off (" + trip.Reason + "). LoopMedic re-arms shortly.", true);
+                    }
                     trip = null;
                     cooldownUntil = now + rearmSeconds;
                 }
@@ -1085,8 +1337,17 @@ namespace LoopMedic
                 string degradedText = string.Join(" | ", degraded);
                 if (degradedText != lastDegradedText)
                 {
-                    if (degradedText.Length > 0) { Log.Write("DEGRADED: " + degradedText); Events.Warn(Events.Degraded, "Protection reduced: " + degradedText); }
-                    else if (lastDegradedText.Length > 0) { Log.Write("Protection back to normal."); Events.Info(Events.Normal, "Protection back to normal."); }
+                    if (degradedText.Length > 0)
+                    {
+                        Log.Write("DEGRADED: " + degradedText); Events.Warn(Events.Degraded, "Protection reduced: " + degradedText);
+                        Mail.Send("Warning - " + degraded[0].Split(':')[0], "LoopMedic warning on this PC:\r\n\r\n" + string.Join("\r\n", degraded) +
+                                  "\r\n\r\nNothing has been powered off. You'll get another email when this clears.", false);
+                    }
+                    else if (lastDegradedText.Length > 0)
+                    {
+                        Log.Write("Protection back to normal."); Events.Info(Events.Normal, "Protection back to normal.");
+                        Mail.Send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.", false);
+                    }
                     lastDegradedText = degradedText;
                 }
 
@@ -1164,6 +1425,15 @@ namespace LoopMedic
                     }
                 }
 
+                Mail.Poll(now);   // mail.json changed? (cheap: a flag set by the file watcher)
+                DateTime? mailTest = Control.Read("mail-test.json", "at");
+                if (mailTest.HasValue && mailTest.Value > lastMailTest && mailTest.Value <= wall.AddMinutes(5) && (wall - mailTest.Value).TotalMinutes < 5)
+                {
+                    lastMailTest = mailTest.Value;
+                    if (Mail.On) { Log.Write("Test email requested from the tray."); Mail.SendTest(); }
+                    else Log.Write("Test email requested, but email alerts are off (mail.json).");
+                }
+
                 // ---- early warning: health samples (warning only, never a trip) ----
                 if (health != null)
                 {
@@ -1202,6 +1472,7 @@ namespace LoopMedic
                     { "tripKind", trip != null ? trip.Kind : null }, { "tripReason", trip != null ? trip.Reason : null },
                     { "tripDeadline", trip != null ? Json.Iso(wall.AddSeconds(trip.DeadlineMono - now)) : null },
                     { "lastPowerOff", lastOffStatus },
+                    { "mail", Mail.On },
                     // early warning: the tray shows it once as a Windows notification (never in the panel)
                     { "healthWarning", health != null && health.WarningText != null ? new Dictionary<string, object> { { "id", Json.Iso(health.WarnedAt.Value) }, { "text", health.WarningText } } : null },
                     { "selfTest", selfTest != null ? new Dictionary<string, object> { { "at", Json.Str(selfTest, "at") }, { "ok", Json.Str(selfTest, "ok") == "True" } } : null },
@@ -1231,7 +1502,7 @@ namespace LoopMedic
             }
             catch { }
             if (ok) { Log.Write("Monthly self-test OK: " + detail + "."); Events.Info(Events.SelfTestOk, "Monthly self-test OK: " + detail + "."); problem = null; }
-            else { Log.Write("Monthly self-test FAILED: " + detail + "."); Events.Error(Events.SelfTestFailed, "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off this PC."); problem = "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off. Reinstall."; }
+            else { Log.Write("Monthly self-test FAILED: " + detail + "."); Mail.Send("Self-test FAILED", "The monthly LoopMedic self-test failed: " + detail + ".\r\n\r\nLoopMedic may not be able to power this PC off. Reinstall it.", true); Events.Error(Events.SelfTestFailed, "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off this PC."); problem = "Monthly self-test FAILED: " + detail + ". LoopMedic may not be able to power off. Reinstall."; }
         }
 
         static void JumpLog(string who, ref int hour, ref int count, DateTime wall, string text)
@@ -1270,7 +1541,13 @@ namespace LoopMedic
             if (dry) Log.Write((kind == "test" ? "TEST" : "DRY RUN") + " - trip: " + reason + " - would power off in " + delay + "s (power-off helper runs in dry-run mode)");
             else Log.Write("TRIPPED: " + reason + " - powering off in " + delay + "s unless cancelled.");
             if (kind == "test") Events.Info(Events.TestTrip, "Test trip from the tray (nothing powers off).");
-            else Events.Warn(Events.Tripped, (dry ? "DRY RUN - " : "") + "LoopMedic tripped: " + reason + ". Powering off in " + delay + " s unless cancelled.");
+            else
+            {
+                Events.Warn(Events.Tripped, (dry ? "DRY RUN - " : "") + "LoopMedic tripped: " + reason + ". Powering off in " + delay + " s unless cancelled.");
+                // sent in the background - never holds up the countdown
+                Mail.Send((dry ? "DRY RUN - " : "") + "POWERING OFF", "LoopMedic tripped: " + reason + ".\r\n\r\nThe PC powers off in " + delay +
+                          " s unless someone cancels it at the PC (" + wall.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + ").", true);
+            }
 
             // The countdown + forced power-off run in their own process (keeps going even if this loop stalls).
             StartHelper(kind, reason, delay, wall, dry, false);
