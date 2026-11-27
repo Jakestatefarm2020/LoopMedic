@@ -2,6 +2,38 @@
 
 LoopMedic for Linux. The Windows version (../windows) keeps the same version numbers and rules.
 
+## 2.3.0 — 2026-11-26
+
+**Air coolers.** Setup asks what cools your CPU. With an air cooler the CPU fan takes the pump's place:
+the same rules, with "CPU fan" in place of "pump" everywhere (log, tray, alarm). A fan that stops at idle
+(zero RPM / fan stop) is refused with advice, since a stopped fan would look like a failure.
+
+**Early warning for a pump slowing down.** Three times an hour the watchdog saves a health sample: the
+median pump speed per CPU-load band (light / medium / heavy), from normal running only. The first 14 days
+set the pump's normal speed (a fixed reference). After that, 12% or more slower over the last 3 days gives
+one desktop notification (it stays in the notification history), an `EARLY WARNING` log line and an email
+if mail is set up. Never a power-off, never DEGRADED, not in the panel. A clearly faster pump means its
+curve was changed, so the normal is relearned; tray menu > **Relearn normal pump speed** does it by hand.
+Settings: `HealthSampleMinutes` (20), `HealthLearnDays` (14), `HealthRecentDays` (3), `HealthWarnPercent` (12).
+
+**Email alerts (optional).** Your own SMTP server, set up in setup step 5/6 or later in
+`/etc/loopmedic/mail.json` (a switched-off template is installed once and never overwritten).
+- Emails: powering off (as the countdown starts), back on after a forced power-off, a cancelled power-off,
+  a warning starting and clearing (incl. the early warning), the self-test failing.
+- Changes are picked up within ~2 s with no restart (inotify, plus a cheap date check once a minute).
+  A broken save is logged and the previous settings stay in use.
+- A typed password is scrambled at once with a random root-only key; the file is root-only.
+- Sent from a background thread with retries: a slow or dead mail server never delays a power-off.
+- STARTTLS (587) or none (25); 465 isn't supported. `loopmedic.py --test-mail` and tray
+  **Send a test email** check it.
+
+**Themes.** Tray right-click > Themes: Stealth (the old look, still the default), Atomic (blue and yellow),
+Dark Side (blue and pink), Ice (white). Status colours are the same in every theme (green ARMED / Live,
+orange warnings, red alarms, blue tests), so the state reads at a glance.
+
+**Quieter log.** Single one-reading pump glitches are counted in the hourly OK line
+("N one-reading pump glitches ignored") instead of one line each.
+
 ## 2.2.0 — 2026-11-25
 
 **Renamed: PumpGuard is now LoopMedic.** Running install.sh removes an old PumpGuard install (service,

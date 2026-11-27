@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Jacob Stiltner")]
 [assembly: System.Reflection.AssemblyProduct("LoopMedic")]
 [assembly: System.Reflection.AssemblyCopyright("(c) 2026 Jacob Stiltner")]
-[assembly: System.Reflection.AssemblyVersion("2.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("2.3.0.0")]
 
 namespace LoopMedicTray
 {

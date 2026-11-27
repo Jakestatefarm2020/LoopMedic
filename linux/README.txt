@@ -1,4 +1,4 @@
-LoopMedic 2.2 for Linux                               by Jacob Stiltner
+LoopMedic 2.3 for Linux                               by Jacob Stiltner
 ==========================================================================
 
   Powers your PC off if your AIO pump stops, before the CPU cooks.
@@ -12,6 +12,11 @@ LoopMedic 2.2 for Linux                               by Jacob Stiltner
   chips designed to run at their limit). A pump that is only SLOWER than
   usual gets a warning, not a power-off. If the CPU is already over its
   limit, the countdown is 5 s instead of 30 ("hotter = faster").
+
+  Air cooler? Setup asks; the CPU fan then takes the pump's place.
+  Early warning: it learns your pump's normal speed (about 2 weeks) and
+  warns - never powers off - if it slowly runs slower (EARLY WARNING).
+  Optional email alerts through your own mail server (EMAIL ALERTS).
 
   PLEASE READ: NO WARRANTY
   LoopMedic is an EXTRA layer of protection, not a replacement for the
@@ -33,24 +38,28 @@ INSTALL (about 3 minutes)
          bash install.sh
 
      It asks for your sudo password when it needs it, and walks you
-     through five steps:
+     through six steps:
 
-     1/5 Tray icon support   offers: sudo pacman -S --needed pyside6
+     1/6 Tray icon support   offers: sudo pacman -S --needed pyside6
                              (the tray only - protection works without it)
-     2/5 Motherboard sensors if no fans show up, offers to enable the
+     2/6 Motherboard sensors if no fans show up, offers to enable the
                              nct6683 driver with force=1 (newer MSI boards
                              use this Nuvoton chip; it is only READ, no fan
                              speed is ever changed), and keeps that setting
-     3/5 Find your pump      numbered fan list; the likely pump is marked
+     3/6 Your CPU cooler     AIO / water loop or air cooler, then a
+                             numbered fan list; the likely pump is marked
                              and Enter picks it; press w to watch them live
                              for 20 s while you change the pump speed.
                              No header at pump speed? Your AIO may report
                              over USB only - pick 0 (temperature only).
-     4/5 CPU limit           suggested for YOUR chip from a table of
+     4/6 CPU limit           suggested for YOUR chip from a table of
                              common AMD/Intel CPUs (9800X3D: 90 C).
                              Enter takes it, l picks a family from a list.
                              It can't be turned off.
-     5/5 Safe test           pretends the pump dies, checks LoopMedic
+     5/6 Email alerts        optional; n skips (set up later in
+                             /etc/loopmedic/mail.json). y asks for your
+                             mail server and sends a test email
+     6/6 Safe test           pretends the pump dies, checks LoopMedic
                              reacts - nothing powers off - then installs
 
   Nothing else to download: Linux reads the sensors itself (the Windows
@@ -78,7 +87,11 @@ THE TRAY ICON
                what only warns, CPU headroom, today's CPU peak / lowest
                pump speed, the last self-test, every fan with a speed bar,
                Pause 30 min / Run test / Open log, and a Live indicator
-  Right-click  same actions + "Exit tray icon" (protection keeps running)
+  Right-click  same actions, plus Themes (Stealth - the default -,
+               Atomic, Dark Side, Ice; status colours never change:
+               green ARMED / Live, orange warnings, red alarms),
+               Relearn normal pump speed, Send a test email (once email
+               alerts are on) and Exit tray icon (protection keeps running)
 
   UPDATES: click the version number (e.g. "v2.2.0") at the top of the
   panel; it turns blue when you point at it. LoopMedic asks GitHub for
@@ -118,8 +131,8 @@ FROM THE TERMINAL
   for 30 s.
 
   Other log lines (none of them powers anything off):
-    Pump jump: ... (one reading, came straight back - ignored)
-                               a single bad reading (see PUMP READINGS)
+    OK ... N one-reading pump glitches ignored
+                               single bad readings, counted each hour
     Pump jump: ... (confirmed by the next reading)
                                the pump really did speed up
     Stalled: no check for N s  the service fell behind (checks normally land
@@ -127,6 +140,7 @@ FROM THE TERMINAL
 
   Files:  /opt/loopmedic/            program + cpu-limits.json (root-owned)
           /etc/loopmedic/config.json settings
+          /etc/loopmedic/mail.json   email alerts (root-only, optional)
           /etc/systemd/system/loopmedic.service
           /var/lib/loopmedic/        self-test + last power-off records
           /var/lib/loopmedic/control the only folder your user can write
@@ -241,6 +255,46 @@ BEFORE YOU UPDATE OR TINKER
 
 
 --------------------------------------------------------------------------
+EARLY WARNING: A PUMP SLOWING DOWN
+--------------------------------------------------------------------------
+
+  Pumps usually wear out slowly before they stop. Three times an hour
+  LoopMedic saves a "health sample": the middle value of the pump
+  readings, kept apart by how busy the CPU was (light / medium / heavy).
+  Only normal running counts (not the first 5 min after start or wake,
+  not while paused or alarming).
+    * The first 2 weeks set your pump's NORMAL speed.
+    * Then, if the last 3 days run 12% or more slower, you get ONE
+      desktop notification (it stays in the notification history), an
+      "EARLY WARNING" log line, and an email if email alerts are on.
+      Never a power-off, never in the panel.
+    * Faster than normal (a new pump curve) is relearned by itself. Made
+      it SLOWER on purpose? Tray menu > Relearn normal pump speed.
+  Samples: /var/lib/loopmedic/health-samples.jsonl (60 days kept).
+
+
+--------------------------------------------------------------------------
+EMAIL ALERTS (optional)
+--------------------------------------------------------------------------
+
+  Through your own mail server (SMTP): POWERING OFF (as the countdown
+  starts), back on after a power-off, a cancelled power-off, a warning
+  starting / clearing (incl. the early warning), a failed self-test.
+  The only thing LoopMedic ever sends out, and only if you set it up.
+  Sent in the background - a broken mail server never delays a power-off.
+
+  Set up in install.sh (step 5), or later:
+      sudo nano /etc/loopmedic/mail.json
+  "Enabled": true, "Server", "Port" (587), "Security" ("starttls", or
+  "none" for a local relay on port 25), "Username", "Password", "To".
+  Port 465 isn't supported. Most big providers need an APP PASSWORD.
+  Saved changes apply within seconds - no restart. Type the password as
+  plain text: LoopMedic scrambles it at once with a root-only key. A
+  mistake in the file is logged and the previous settings keep working.
+  Then tray menu > Send a test email.
+
+
+--------------------------------------------------------------------------
 CHANGE SETTINGS / REMOVE
 --------------------------------------------------------------------------
 
@@ -254,6 +308,8 @@ CHANGE SETTINGS / REMOVE
                              table's value for your CPU (or 95 C) is used
       CpuHotSeconds
       ShutdownDelaySeconds (30), HotShutdownDelaySeconds (5)
+      CoolerType ("aio"; "air" = watch the CPU fan)
+      HealthWarnPercent (12), HealthLearnDays (14)   early warning
   * Remove completely: bash uninstall.sh
 
   !! MOVING THE PUMP CABLE TO ANOTHER HEADER?

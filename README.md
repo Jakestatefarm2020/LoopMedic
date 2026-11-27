@@ -12,10 +12,19 @@ LoopMedic runs quietly in the background from startup. Every 2 seconds it reads 
 | the pump has **stopped** (150 rpm or less)  | 10 s                     | an alarm with a 30 s countdown; if nobody chooses, the PC powers off (5 s if the CPU is already over its limit) |
 | the CPU is at or above its limit            | 30 s (60 s on some chips) | same                                                                    |
 | the pump is **slower** than usual (under 500 rpm, but spinning) | 10 s | a warning only - the PC is not powered off for this                 |
+| the pump has slowly run **12% slower** than its learned normal | 3 days | an early warning (one notification) - pumps often slow down as they wear out |
 
 A tray icon shows it's working, with live pump, CPU and fan readings. It never changes a fan or pump
 speed and leaves your cooler's own app alone. It runs a self-check at every boot and a self-test once a
 month, and after a forced power-off it tells you why the PC turned off.
+
+- **AIO or air cooler.** With an air cooler, the CPU fan takes the pump's place: same rules.
+- **Early warning.** It learns your pump's normal speed over two weeks (per CPU-load band), then warns you
+  if it slowly runs slower. Warning only, never a power-off.
+- **Email alerts (optional).** Through your own SMTP server: powering off, back on, warnings, a failed
+  self-test. Set up during install or later in `mail.json`; the password is encrypted on the PC. It's the
+  only thing LoopMedic ever sends out, and only if you set it up.
+- **Themes.** Stealth (default), Atomic, Dark Side and Ice. Status colours stay the same in every theme.
 
 > **No warranty.** LoopMedic is an *extra* layer of protection, not a replacement for the ones your PC
 > already has (BIOS fan-fail and temperature shutdowns, the CPU's own thermal limits). It can miss a

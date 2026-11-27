@@ -1,5 +1,5 @@
 ==========================================================================
-  LOOPMEDIC 2.2
+  LOOPMEDIC 2.3
   by Jacob Stiltner
 
   Powers your PC off if your AIO pump stops, before the CPU cooks.
@@ -39,6 +39,18 @@ It runs quietly in the background from startup. Every 2 seconds it reads:
 A shield icon in the system tray shows it's working, with live pump,
 CPU and fan readings.
 
+AIR COOLER? Setup asks what cools your CPU. With an air cooler, the CPU
+fan takes the pump's place: same rules, "CPU fan" instead of "pump".
+
+EARLY WARNING: in the background LoopMedic also learns your pump's
+normal speed (about 2 weeks), then warns you if it slowly runs slower -
+pumps often do that as they wear out. That's a Windows notification (it
+stays in the notification center) and a log line - never a power-off.
+
+EMAIL ALERTS (optional): with your own mail server, LoopMedic can email
+you when it powers the PC off, when it's back on, when a warning starts
+or clears, and if its self-test fails. See "EMAIL ALERTS" below.
+
 It doesn't touch your cooler's app (NZXT CAM, iCUE, etc.); that keeps
 working as normal. LoopMedic only READS sensors; it never changes a fan
 or pump speed.
@@ -69,7 +81,7 @@ INSTALL (about 3 minutes)
 
 1. Double-click Install.bat and click Yes on the admin prompt.
 
-2. Follow the 5 steps on screen:
+2. Follow the 6 steps on screen:
 
    Step 1 - Unblocks the files and builds LoopMedic from its source code
             (with the compiler built into Windows - nothing to install).
@@ -87,12 +99,15 @@ INSTALL (about 3 minutes)
             - If Windows asks for a restart, restart and run Install.bat
               again.
 
-   Step 3 - Asks you to pick your pump. You'll see a numbered list of fan
-            sensors and their rpm. If one looks like the pump, it's
-            marked "<- looks like the pump" and Enter picks it.
+   Step 3 - Asks what cools your CPU (1 = AIO / water loop, 2 = air
+            cooler), then which sensor to watch. You'll see a numbered
+            list of fan sensors and their rpm. If one looks like the
+            pump (or the CPU fan), it's marked and Enter picks it.
             The pump is usually the one at 1,500-4,000 rpm; the 0 rpm
             entries are empty headers.
             Pick 0 if your pump isn't on a motherboard header.
+            Air cooler: a CPU fan that stops at idle ("zero RPM" / fan
+            stop in the BIOS) can't be watched - setup tells you.
 
    Step 4 - Suggests a CPU temperature limit for YOUR chip (from a table
             of common AMD and Intel CPUs). Press Enter to take it, type
@@ -105,7 +120,12 @@ INSTALL (about 3 minutes)
             The temperature check can't be turned off: it's the backup
             for everything the pump check can't see.
 
-   Step 5 - Runs a safe test, then installs. It pretends the pump reads
+   Step 5 - Optional: email alerts. Say N to skip (you can set them up
+            later, see "EMAIL ALERTS" below). Say Y and it asks for your
+            mail server, port, user name, password and where to send
+            alerts, then sends a test email.
+
+   Step 6 - Runs a safe test, then installs. It pretends the pump reads
             0 rpm and checks that LoopMedic reacts; nothing powers off.
             Then answer Y to install.
 
@@ -148,8 +168,15 @@ under the ^ arrow - drag it onto the taskbar to keep it visible).
                  - buttons: Pause 30 min / Run test / Open log
                  - bottom-left dot: Live (green), Waiting for sensors
                    (orange, 10-20 sec old), Offline (20+ sec)
-  Right-click  the same actions + "Exit tray icon"
-               (exiting only hides the icon - protection keeps running)
+  Right-click  the same actions, plus:
+                 - Themes: Stealth (default, dark), Atomic (blue and
+                   yellow), Dark Side (blue and pink), Ice (white).
+                   Status colours never change: green ARMED / Live,
+                   orange warnings, red alarms.
+                 - Relearn normal pump speed (see EARLY WARNING)
+                 - Send a test email (only once email alerts are on)
+                 - Exit tray icon (only hides the icon - protection
+                   keeps running)
 
 UPDATES: click the version number (e.g. "v2.2.0") at the top of the panel.
 It turns blue when you point at it. LoopMedic asks GitHub for the newest
@@ -250,10 +277,11 @@ PUMP READINGS: WHAT THE NUMBER REALLY MEANS
   speed wire away from power cables.
 
   How LoopMedic handles it: a sudden JUMP UP is only believed if the
-  next reading agrees. A single odd reading is ignored and logged as
-  "came straight back - ignored". A DROP always counts straight away,
-  so noise can never hide a pump that has stopped. The panel shows what
-  LoopMedic believes; the log keeps every jump so you can see them.
+  next reading agrees. A single odd reading is ignored and counted in
+  the hourly "OK" line ("N one-reading pump glitches ignored"). A DROP
+  always counts straight away, so noise can never hide a pump that has
+  stopped. The panel shows what LoopMedic believes; real jumps are
+  logged so you can see them.
 
 
 --------------------------------------------------------------------------
@@ -359,6 +387,57 @@ THE TRAY ICON). By hand: unzip the new LoopMedic.zip and run Install.bat.
 
 
 --------------------------------------------------------------------------
+EARLY WARNING: A PUMP SLOWING DOWN
+--------------------------------------------------------------------------
+
+Pumps usually wear out slowly before they stop. Three times an hour
+LoopMedic saves a "health sample": the middle value of about 600 pump
+readings, kept apart by how busy the CPU was (light / medium / heavy),
+so like is compared with like. Only normal running counts: not the
+first 5 minutes after start or waking, not while paused or alarming.
+
+* The first 2 weeks set your pump's NORMAL speed.
+* After that, if the last 3 days run 12% or more slower than normal,
+  you get ONE Windows notification (it stays in the notification
+  center) and an "EARLY WARNING" line in the log - plus an email if
+  email alerts are on. It repeats after a week, or sooner if it gets
+  5% worse. It is never a power-off and never shows in the panel.
+* Changed the pump speed on purpose (a new curve in your cooler app)?
+  Faster than normal is noticed and relearned by itself. If you made it
+  SLOWER, right-click the shield > Relearn normal pump speed.
+
+The samples are in health-samples.jsonl (60 days kept) next to the log.
+
+
+--------------------------------------------------------------------------
+EMAIL ALERTS (optional)
+--------------------------------------------------------------------------
+
+LoopMedic can email you through your own mail server (SMTP):
+  - POWERING OFF (sent as the countdown starts)
+  - back on after LoopMedic powered the PC off
+  - a power-off cancelled at the PC
+  - a warning starting (incl. the early warning) and clearing
+  - the monthly self-test failing
+This is the only thing LoopMedic ever sends out, and only if you set it
+up. Sending happens in the background: a slow or broken mail server can
+never delay a power-off.
+
+Set it up in setup (step 5), or later by editing
+  C:\ProgramData\LoopMedic\mail.json
+in Notepad run as administrator (the file is admin-only):
+  "Enabled": true, "Server", "Port" (587), "Security" ("starttls", or
+  "none" for a local relay on port 25), "Username", "Password", "To".
+  Port 465 (SSL) isn't supported - nearly every provider also offers 587.
+  Gmail, Outlook and most big providers need an APP PASSWORD.
+Save it and LoopMedic picks it up within a few seconds - no restart.
+Type the password as plain text: LoopMedic encrypts it straight away
+(only this PC can read it back). If the file has a mistake, the log says
+so and the previous mail settings keep working.
+Then right-click the shield > Send a test email.
+
+
+--------------------------------------------------------------------------
 CHANGE SETTINGS / REMOVE
 --------------------------------------------------------------------------
 
@@ -377,6 +456,9 @@ CHANGE SETTINGS / REMOVE
     CpuHotSeconds (30)       how long the CPU must stay at the limit
     ShutdownDelaySeconds (30)      the alarm's countdown
     HotShutdownDelaySeconds (5)    the countdown when already too hot
+    CoolerType ("aio")       "air" = watch the CPU fan instead of a pump
+    HealthWarnPercent (12)   early warning: how much slower than normal
+    HealthLearnDays (14)     early warning: days to learn the normal
 
 * Remove completely: double-click Uninstall.bat.
 

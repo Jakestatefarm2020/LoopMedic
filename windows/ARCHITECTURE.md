@@ -43,7 +43,9 @@ this repo. The Linux tray does the same with `LoopMedic-Linux.tar.gz(.sig)` and 
 | `loopmedic.log` (+ `.old`) | worker, helper | 1 MB rotation, one old file |
 | `selftest.json` | worker | last monthly self-test |
 | `last-poweroff.json` | helper (write-through, before power-off) | "why did my PC turn off" |
-| `control\` (Users: Modify) | tray | `pause.json` (until), `test.json` (requested), `cancel.json` (at), `poweroff.json` (at), `tray.json` (at) |
+| `health-samples.jsonl`, `health.json` | worker | early-warning samples (60 days) and the learned normal |
+| `mail.json` | installer (template), you, worker (encrypts the password) | email alert settings; SYSTEM + Administrators only |
+| `control\` (Users: Modify) | tray | `pause.json` (until), `test.json` (requested), `cancel.json` (at), `poweroff.json` (at), `tray.json` (at), `health-reset.json` (at), `mail-test.json` (at) |
 
 The worker reads only **dates** from `control\` files and ignores everything else in them.
 
@@ -63,9 +65,39 @@ The worker reads only **dates** from `control\` files and ignores everything els
    held 5 s, cuts the countdown short.
 6. Grace: no trips in the first `StartupGraceSeconds` (20), or for `RearmSeconds` (120) after a cancel.
 
+7. **Air cooler mode** (`CoolerType` = `air`): the CPU fan is watched with exactly the same rules; only the
+   wording changes.
+
 All durations use a monotonic clock (Stopwatch), so a clock change can't delay a trip. A pause request is
 turned into a monotonic deadline when the file is first seen. The deadline is capped at 2 h from the file's
 write time, and files dated more than 5 min in the future are ignored.
+
+## Early warning (a pump slowing down)
+
+Accepted readings go into the current 20-minute window (`HealthSampleMinutes`), but only while running
+normally: pump known good and above the stopped line, no pause or trip, and at least 5 min after start or
+after a 10 s+ stall (sleep). Each reading is filed under the CPU load band at that moment (LHM "CPU Total":
+light < 25 %, medium < 60 %, heavy; "all" without a load sensor). At the end of the window, each band with
+≥ 60 readings becomes one sample (median rpm, median °C, count) appended to `health-samples.jsonl`.
+
+The first `HealthLearnDays` (14) of samples set the **normal** per band (median of ≥ 36 samples), kept in
+`health.json`. It is fixed so that a slow decline can't drag its own baseline down. Each new sample compares
+the median of the last `HealthRecentDays` (3, ≥ 18 samples) with the normal:
+- ≥ `HealthWarnPercent` (12 %) slower in any band: `EARLY WARNING` log line, `healthWarning` {id, text} in
+  status.json (the tray shows it once per id as a notification, never in the panel), and an email.
+  Repeats after 7 days or 5 points worse; clears below half the threshold.
+- ≥ 12 % faster with nothing slower: the curve was changed, so the samples and normal are reset and
+  learning starts again. `control\health-reset.json` (tray: Relearn) does the same on request.
+
+## Email alerts
+
+Optional, off until `mail.json` says `"Enabled": true`. The worker loads it at start, then reloads it ~2 s
+after a FileSystemWatcher change notice (no polling), with a last-write-time check once a minute as a
+backstop. A bad file is logged and the previous settings stay in use; protection is never restarted.
+A plain-text `Password` is replaced at once by `PasswordProtected` (DPAPI, LocalMachine scope plus a fixed
+entropy, so only this PC can decrypt it), and the file's ACL is reset to SYSTEM + Administrators.
+Messages go into a queue served by a background thread (`SmtpClient`, 20 s timeout, STARTTLS or none;
+important ones retry for ~15 min, others are capped at 6 an hour). A trip never waits on mail.
 
 ## Self-checks
 
@@ -86,6 +118,8 @@ write time, and files dated more than 5 min in the future are ignored.
 | Tampering with the program files | admin-only ACL. The SYSTEM task never runs anything a normal user can edit. |
 | A fake or altered update (hijacked account, swapped download) | refused unless signed with the release key, which never leaves the author's PC. The first download from the Releases page is trusted as-is (HTTPS from GitHub). |
 | Sensor noise / bad tach | jump rule; only a *stopped* pump trips |
+| The mail password on disk | encrypted with DPAPI (this PC only) as soon as it is seen; admin-only file. An admin on the PC can still recover it - use an app password. |
+| A dead or slow mail server | sends run on their own thread with timeouts; trips and power-offs never wait for them |
 | Pulse-count mismatch (rpm wrong by 2×) | only a *stopped* pump trips. Slow = warning. |
 | A pump spinning without flow | CPU temperature trip only |
 | A frozen OS, sleep, boot | out of scope: the CPU's own THERMTRIP and BIOS settings |
@@ -94,9 +128,12 @@ write time, and files dated more than 5 min in the future are ignored.
 ## Tests
 
 `tests\run-tests.py` runs the real exe against fake sensors (`--fake-sensors` JSON), in dry-run mode, with the
-Event Log off. It covers 24 scenarios: trips, the jump rule, slow-pump warnings, clock jumps, cancel, hotter =
+Event Log off. It covers 34 scenarios: trips, the jump rule, slow-pump warnings, clock jumps, cancel, hotter =
 faster, pause limits, a sensor vanishing, CPU changes, broken config, missing privilege, self-tests, last
-power-off, temperature-only mode, and supervisor restarts after a crash or a hang.
+power-off, temperature-only mode, air cooler mode, supervisor restarts after a crash or a hang, the early
+warning (a dying pump, a slow decline, a raised curve, a steady pump, still learning, sampling and relearn)
+and email alerts against a local fake mail server (trip email, encrypted password, live reload, a broken
+file, test emails, and a dead server that must not delay the power-off).
 
 Tested on the author's own PC (November 2026, real hardware, real forced power-offs; scripts in `tools/real-tests/`):
 
