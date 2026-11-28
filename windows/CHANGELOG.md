@@ -2,6 +2,28 @@
 
 LoopMedic for Windows. The Linux port (../linux) keeps the same version numbers and rules.
 
+## 2.3.2 — 2026-11-28
+
+Fixes from an independent review.
+
+- **A pump that's dead at boot can now trip.** A pump that has read "stopped" since boot isn't trusted on its
+  own (a speed cable on the wrong header reads 0 too), so until now only a warning was given. Now LoopMedic
+  powers off anyway if the CPU confirms the cooler is dead: at or above `NeverSpunTripC` (default: the limit
+  minus 15 °C) while lightly loaded (`NeverSpunMaxLoad`, 25 %) for `CpuHotSeconds`. A busy CPU is left to the
+  normal CPU trip. If the last power-off was for this, the next boot only warns (tray + log, no email) until
+  the pump spins, so it can't power off on every boot. The "hasn't spun since boot" email is now important
+  (retried).
+- **Failed sensor reads no longer reset a stall.** Once the pump reads stopped, a failed read counts as still
+  stopped; only a real reading above the stopped line clears it. A dying tach that alternates 0 and no
+  reading now trips.
+- **Safer updates.** The tray still checks the download, but the install now starts from the installed
+  LoopMedic.exe (admin-only folder): it copies the package into an admin-only staging folder, checks the
+  signature again there, refuses a version that isn't newer, and runs the new installer from there with only
+  Windows' own PowerShell modules. `-AllowDowngrade` on `Update-LoopMedic.ps1` for a deliberate rollback;
+  Install.bat from an older release still works. (This update itself still installs the old way.)
+- **Tray:** empty fan headers (0 rpm) are no longer listed; the byline reads "by Jake".
+- **Docs:** honest headline (powers off instead of letting the CPU sit at its thermal limit unnoticed).
+
 ## 2.3.1 — 2026-11-27
 
 - **Two new themes.** Tray right-click > Themes: **Neon Dark** (hot magenta pump, neon cyan CPU) and

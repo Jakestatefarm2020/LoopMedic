@@ -47,12 +47,13 @@ import ssl
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 GPU_CHIPS = {"amdgpu", "radeon", "nouveau", "nvidia", "i915", "xe"}
 CPU_CHIPS = ("k10temp", "zenpower", "coretemp")
 TIMER_UNIT = "loopmedic-poweroff"
@@ -576,8 +577,10 @@ class Health:
 
 # ----------------------------------------------------------------- email alerts (optional, your own mail server)
 # /etc/loopmedic/mail.json (root-only): off until "Enabled": true. inotify tells us when it changes (no polling),
-# plus a cheap date check once a minute in case a notice was missed. A typed password is scrambled straight away with
-# a random key in /var/lib/loopmedic/mail.key (root-only) - so it never sits in the file as plain text. A broken
+# plus a cheap date check once a minute in case a notice was missed. A typed password is obfuscated straight away
+# (SHA-256 keystream + HMAC) with a random key in /var/lib/loopmedic/mail.key (root-only), so it never sits in the
+# file as plain text. The key is on the same disk, so this is obfuscation, not real protection: root can recover the
+# password - use an app password. (Kept as it is: changing it would break existing mail.json files.) A broken
 # file is logged and the previous settings kept. Emails go out from a background thread with short timeouts: a slow
 # or dead mail server can never delay a trip or a power-off.
 def _keystream(key, nonce, n):
@@ -841,7 +844,136 @@ class Mail:
                         self.log(f'Mail: not sent ({e}) - giving up on "{m["subject"]}".')
 
 
+# Public half of the release signing key (RSA-3072); the private half never leaves the author's PC.
+KEY_N = int.from_bytes(base64.b64decode(
+    "90PksaPHuTI9JIRU4CFL7dWDKaUDSGOrGCzGP8uwaAW8UqZsEfGJY9aeQY9cI1NcPOrwDWSBJZgkYC3brpgKLwzt1RCtwGS4+cuB/bEsYfFj7y5wUv58k/iXxSwJ"
+    "hYZhrVBhnoU48g/FEL/oZyQrqJsLw139aAW54AxxFS4Q2fehI2nFuTiB6vRvOQILXvW756vnuccAILq1Duxfn+pZpfZq5111pfFopqaJaE1y9nEZ98trjDCgJuXI"
+    "9WSIS2enYprBs3Wh34tkbjrOV/pPjzHxiuZUD7i+xfS2UhMmUwTQ5ifyL3kmNO7mVnoKxshSen5JhEhhnN5XQCNa3Y3PcGEV+CTrZn4hs1aNp4PX7HZyA1nu6XFO"
+    "MVn8G5Sy+Meq4YxrvwZuQ1KPpReTIsyCv4gHhOfZJVgiNvHIvmH7L5TywQnYhV5EMc0rt/VJNw+fCOCjAeHdHWUpiaGb5WpAqziWP3ExDppYTjpGo7cmf38wHBxS"
+    "NomRqOl6WXpjLZnF"), "big")
+KEY_E = 65537
+SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def verify_signature(data, sig, key=None):
+    """RSA PKCS#1 v1.5 / SHA-256 check against the built-in release key (standard library only).
+    key = (n, e) is for tests only."""
+    n, e = key or (KEY_N, KEY_E)
+    k = (n.bit_length() + 7) // 8
+    if len(sig) != k:
+        return False
+    di = SHA256_PREFIX + hashlib.sha256(data).digest()
+    expected = b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
+    return pow(int.from_bytes(sig, "big"), e, n).to_bytes(k, "big") == expected
+
+
+# ------------------------------------------------------------------ update: the elevated step
+# The tray downloads + checks the release in a temp folder the user can write to (a fast pre-filter), then runs
+# THIS - the installed copy in /opt/loopmedic, which only root can change - through pkexec:
+#   loopmedic.py --apply-update PACKAGE SIG --user U --group G [--allow-downgrade]
+# Nothing from the temp folder is trusted: the package is copied into a root-only staging folder, its
+# signature is checked again there, it must be newer than this version, and only then is its
+# setup_loopmedic.py --update-root run - from staging. --apply-dry-run (tests) does everything except run it.
+MAX_PACKAGE = 64 * 1024 * 1024
+
+
+def apply_update(argv):
+    ap = argparse.ArgumentParser(prog="loopmedic.py --apply-update")
+    ap.add_argument("--apply-update", nargs=2, metavar=("PACKAGE", "SIG"), required=True)
+    ap.add_argument("--user", required=True)
+    ap.add_argument("--group", required=True)
+    ap.add_argument("--allow-downgrade", action="store_true", help="skip only the version check (deliberate rollback)")
+    ap.add_argument("--apply-dry-run", action="store_true", help=argparse.SUPPRESS)   # tests: never runs the installer
+    ap.add_argument("--data-dir", help=argparse.SUPPRESS)                              # tests only (with --apply-dry-run)
+    ap.add_argument("--test-key", help=argparse.SUPPRESS)                              # tests only (with --apply-dry-run)
+    a = ap.parse_args(argv)
+    dry = a.apply_dry_run
+
+    def refuse(code, msg):
+        print(f"UPDATE REFUSED: {msg}", file=sys.stderr)
+        return code
+
+    if not dry:
+        if a.data_dir or a.test_key:
+            return refuse(6, "--data-dir / --test-key can't be used for a real update")
+        if os.geteuid() != 0:
+            return refuse(5, "this must run as root (the tray starts it through pkexec)")
+    if not (re.fullmatch(r"[A-Za-z0-9._-]+", a.user) and re.fullmatch(r"[A-Za-z0-9._-]+", a.group)):
+        return refuse(6, "bad --user / --group")
+    pkg_src, sig_src = a.apply_update
+    try:
+        if not os.path.isfile(pkg_src) or os.path.getsize(pkg_src) > MAX_PACKAGE or not os.path.isfile(sig_src) \
+                or os.path.getsize(sig_src) > 64 * 1024:
+            return refuse(4, "the downloaded package is missing or too big")
+        data_dir = a.data_dir if dry else "/var/lib/loopmedic"
+        stage = os.path.join(data_dir, "staging")
+        if os.path.islink(stage):
+            os.remove(stage)
+        elif os.path.isdir(stage):
+            shutil.rmtree(stage)
+        os.makedirs(data_dir, exist_ok=True)
+        os.mkdir(stage, 0o700)
+        if not dry:
+            st = os.lstat(stage)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077:
+                return refuse(6, "the staging folder isn't root-only")
+        pkg = os.path.join(stage, "LoopMedic-Linux.tar.gz")
+        sig_path = os.path.join(stage, "LoopMedic-Linux.tar.gz.sig")
+        shutil.copyfile(pkg_src, pkg)
+        shutil.copyfile(sig_src, sig_path)
+        # from here on, only the staged copies are read
+        with open(pkg, "rb") as f:
+            data = f.read()
+        try:
+            with open(sig_path, "rb") as f:
+                sig = base64.b64decode(f.read().strip(), validate=True)
+        except ValueError:
+            return refuse(2, "the signature file is damaged")
+        key = None
+        if dry and a.test_key:
+            with open(a.test_key, encoding="utf-8") as f:
+                k = json.load(f)
+            key = (int.from_bytes(base64.b64decode(k["n"]), "big"), int.from_bytes(base64.b64decode(k["e"]), "big"))
+        if not verify_signature(data, sig, key):
+            return refuse(2, "the package FAILED the signature check in the protected folder - please tell the author")
+        x = os.path.join(stage, "x")
+        with tarfile.open(pkg) as tar:
+            for m in tar.getmembers():   # nothing outside the folder, no links or devices
+                if m.name.startswith("/") or ".." in m.name.replace("\\", "/").split("/") or not (m.isfile() or m.isdir()):
+                    return refuse(4, f"the package has an unexpected file in it ({m.name})")
+            if hasattr(tarfile, "data_filter"):   # Python 3.12+: also refuses links, devices and odd permissions
+                tar.extractall(x, filter="data")
+            else:
+                tar.extractall(x)
+        new_py = os.path.join(x, "LoopMedic-Linux", "loopmedic", "loopmedic.py")
+        setup = os.path.join(x, "LoopMedic-Linux", "loopmedic", "setup_loopmedic.py")
+        if not (os.path.isfile(new_py) and os.path.isfile(setup)):
+            return refuse(4, "the package has no setup script - download it from GitHub and run install.sh")
+        with open(new_py, encoding="utf-8") as f:
+            m = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', f.read(), re.M)
+        new_v = tuple(int(p) for p in m.group(1).split(".")) if m else None
+        now_v = tuple(int(p) for p in VERSION.split("."))
+        if not new_v:
+            return refuse(4, "can't read the package's version")
+        if new_v <= now_v and not a.allow_downgrade:
+            return refuse(3, f"the package is LoopMedic {m.group(1)}, not newer than the installed {VERSION} "
+                             "(going back on purpose? run install.sh from the older release)")
+    except (OSError, tarfile.TarError, KeyError, ValueError) as e:
+        return refuse(6, f"update failed: {e}")
+    print(f"Signature OK. LoopMedic {VERSION} -> {m.group(1)}.")
+    cmd = [sys.executable, setup, "--update-root", "--user", a.user, "--group", a.group] + (["--allow-downgrade"] if a.allow_downgrade else [])
+    if dry:
+        print("DRY RUN - would run: " + " ".join(cmd))
+        return 0
+    r = subprocess.run(cmd)
+    shutil.rmtree(stage, ignore_errors=True)
+    return r.returncode
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if "--apply-update" in argv:
+        return apply_update(argv)
     ap = argparse.ArgumentParser(description="LoopMedic for Linux - powers off if the AIO pump stops or the CPU overheats.")
     ap.add_argument("--config", default="/etc/loopmedic/config.json")
     ap.add_argument("--cpu-limits", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpu-limits.json"))
@@ -972,6 +1104,15 @@ def main(argv=None):
         log(f"CpuMaxTempC was off or out of range - the temperature trip can't be turned off; using {cpu_max:g} C "
             f"({known[2] + ' table' if known else 'fallback'}).")
     temp_check = cpu_temp is not None
+    # A pump that has read "stopped" since boot isn't trusted (a misplugged speed cable reads 0 too), so the normal
+    # pump trip waits for one good reading. Second path: it trips anyway if the CPU confirms the cooler is dead -
+    # warm (NeverSpunTripC, 0 = the limit minus 15) while lightly loaded (<= NeverSpunMaxLoad %), for CpuHotSeconds.
+    # Never below CoolCpuTempC. A busy CPU (gaming) is left to the normal CPU trip.
+    never_spun_c = num("NeverSpunTripC", 0)
+    if never_spun_c <= 0:
+        never_spun_c = cpu_max - 15
+    never_spun_c = max(never_spun_c, cool_cpu_c)
+    never_spun_load = num("NeverSpunMaxLoad", 25)
 
     fans = fan_sensors(sensors)
     simulating = a.simulate_pump >= 0
@@ -1022,11 +1163,18 @@ def main(argv=None):
         write_json_durable(last_off_path, last_off)
     elif last_off and not last_off.get("armed"):
         last_off = None
+    # Boot-loop guard: the last power-off was this never-spun rule and the pump hasn't spun since -> this boot only
+    # warns for it. Cleared (in last-poweroff.json) the first time the pump reads OK.
+    never_spun_guard = bool(last_off and last_off.get("kind") == "neverspun" and not last_off.get("cleared"))
+    if never_spun_guard:
+        log(f"Last power-off was for a {pw} that never spun. Not powering off again for that until the {pw} spins "
+            "(the CPU trip still works).", 4)
 
     sd_notify("READY=1")
     power = PowerOff(log)
     started = time.monotonic()
-    pump_bad_since = hot_since = pump_null_since = temp_null_since = pump_slow_since = None
+    pump_bad_since = hot_since = pump_null_since = temp_null_since = pump_slow_since = never_spun_since = None
+    never_spun_held = False   # the guard stopped a never-spun trip this boot
     pump_ever_ok = pump_slow_reported = False
     last_heartbeat = time.monotonic()
     cooldown_until = 0.0
@@ -1041,7 +1189,7 @@ def main(argv=None):
     last_test = last_cancel = last_poweroff = datetime.now()
     was_paused = False
     pause_end_mono, pause_mtime, pause_until_wall = 0.0, None, None
-    last_degraded = ""
+    last_degraded = last_degraded_mail = ""
     selftest = read_json(selftest_path)
     selftest_problem = None
     if selftest and selftest.get("ok") is False:
@@ -1180,6 +1328,12 @@ def main(argv=None):
                 day_min_pump = rpm
             if rpm is not None and rpm > pump_stopped:
                 pump_ever_ok = True
+                if never_spun_guard:
+                    never_spun_guard = never_spun_held = False
+                    last_off["cleared"] = True
+                    write_json_durable(last_off_path, last_off)
+                    log(f"{Pw} is spinning ({rpm:g} rpm) - the never-spun power-off is armed again.")
+            load = cpu_load.read()
             if rpm is None and (pump or simulating):
                 pump_null_since = pump_null_since or mono
             else:
@@ -1275,8 +1429,15 @@ def main(argv=None):
             if temp_null_since and mono - temp_null_since >= 30:
                 degraded.append("CPU temperature not responding.")
             in_grace = elapsed < grace_s
+            never_spun_line = (f"{Pw} has read {fmt(rpm)} rpm since boot - cable moved? {Pw} trip held until it spins; "
+                               "the CPU trip and a hot-at-idle check still work.")
             if (pump or simulating) and not pump_ever_ok and not in_grace and rpm is not None:
-                degraded.append(f"{Pw} has read {rpm:g} rpm since boot - cable moved? {Pw} trip held; CPU temperature still watched.")
+                degraded.append(never_spun_line)
+            # the guard's warning: tray notification + log only - no email (whoever powers the PC back on is at it)
+            held_line = (f"{Pw} hasn't spun since boot and the CPU got hot at light load. LoopMedic already powered off once "
+                         f"for this, so it won't again until the {pw} spins - check the {pw}.")
+            if never_spun_held:
+                degraded.append(held_line)
             # Slow but spinning: warn, don't power off (eco modes, or a pump that reports a different pulse
             # count, can read low). The CPU temperature trip still covers a pump that's really failing.
             if pump_ever_ok and rpm is not None and pump_stopped < rpm < pump_min:
@@ -1292,17 +1453,27 @@ def main(argv=None):
             if dtext != last_degraded:
                 if dtext:
                     log(f"DEGRADED: {dtext}", 4)
-                    mail.send("Warning - " + degraded[0].split(":")[0], "LoopMedic warning on this PC:\n\n" + "\n".join(degraded) +
-                              "\n\nNothing has been powered off. You'll get another email when this clears.")
                 elif last_degraded:
                     log("Protection back to normal.", 5)
-                    mail.send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.")
                 last_degraded = dtext
+            # email: everything except the guard's line; the never-spun warning is important (retried)
+            mail_lines = [d for d in degraded if d != held_line]
+            mtext = " | ".join(mail_lines)
+            if mtext != last_degraded_mail:
+                if mtext:
+                    mail.send("Warning - " + mail_lines[0].split(":")[0], "LoopMedic warning on this PC:\n\n" + "\n".join(mail_lines) +
+                              "\n\nNothing has been powered off. You'll get another email when this clears.", never_spun_line in mail_lines)
+                elif last_degraded_mail:
+                    mail.send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.")
+                last_degraded_mail = mtext
 
             # --- checks
             if not in_grace and not paused and not trip and mono >= cooldown_until:
-                if (pump or simulating) and rpm is not None and pump_ever_ok:
-                    if rpm <= pump_stopped:
+                # Once a stall has started, a failed read counts as still stopped: a dying tach that alternates
+                # 0 / no reading must not keep restarting the window. Only a real reading above the stopped line
+                # clears it. (pump_bad_since None here means rpm has a value.)
+                if (pump or simulating) and pump_ever_ok and (rpm is not None or pump_bad_since is not None):
+                    if rpm is None or rpm <= pump_stopped:
                         # CPU cool -> allow longer (a firmware flash or fan calibration stops the pump briefly).
                         cool = (not simulating) and temp is not None and temp < cool_cpu_c
                         window = pump_fail_cool_s if cool else pump_fail_s
@@ -1312,7 +1483,7 @@ def main(argv=None):
                                 (f" (CPU cool at {temp:g} C: allowing {pump_fail_cool_s:g}s, e.g. for a firmware update)." if cool else "."), 4)
                         elif mono - pump_bad_since >= window:
                             hot = temp_check and temp is not None and temp >= cpu_max
-                            protect("pump", f"{pw} at {rpm:g} rpm for {int(mono - pump_bad_since)}s (CPU {fmt(temp)} C)",
+                            protect("pump", f"{pw} at {fmt(rpm)} rpm for {int(mono - pump_bad_since)}s (CPU {fmt(temp)} C)",
                                     hot_delay_s if hot else delay_s)
                             pump_bad_since = hot_since = None
                             cooldown_until = mono + rearm_s
@@ -1321,6 +1492,27 @@ def main(argv=None):
                         pump_bad_since = None
                 else:
                     pump_bad_since = None
+
+                # never spun since boot + CPU hot at light load = the cooler really is dead
+                never_spun_hot = ((pump or simulating) and not pump_ever_ok and rpm is not None and rpm <= pump_stopped
+                                  and temp is not None and temp >= never_spun_c and load is not None and load <= never_spun_load)
+                if never_spun_hot and not never_spun_held:
+                    if never_spun_since is None:
+                        never_spun_since = mono
+                        log(f"{Pw} hasn't spun since boot and the CPU is {temp:g} C at {load:.0f}% load - watching.", 4)
+                    elif mono - never_spun_since >= cpu_hot_s:
+                        if never_spun_guard:
+                            never_spun_held = True
+                            log(f"NOT powering off: {pw} hasn't spun since boot, CPU {temp:g} C at {load:.0f}% load - "
+                                "already powered off once for this (boot-loop guard).", 4)
+                        else:
+                            protect("neverspun", f"{pw} hasn't spun since boot, CPU {temp:g} C at {load:.0f}% load", delay_s)
+                            pump_bad_since = hot_since = None
+                            cooldown_until = mono + rearm_s
+                        never_spun_since = None
+                elif never_spun_since is not None and not never_spun_hot:
+                    log(f"No longer hot at light load (CPU {fmt(temp)} C, {fmt(load)}% load).")
+                    never_spun_since = None
 
                 if temp_check and not trip and temp is not None:
                     if temp >= cpu_max:
@@ -1364,7 +1556,6 @@ def main(argv=None):
 
             # --- early warning: health samples (warning only, never a trip)
             if health:
-                load = cpu_load.read()
                 settled = elapsed >= health_warmup and mono - last_wake >= health_warmup
                 if settled and not paused and not trip and pump_ever_ok and pump_bad_since is None and rpm is not None and rpm > pump_stopped:
                     health.add(rpm, temp, load)

@@ -36,38 +36,21 @@ from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QCursor, QDesk
                            QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-AUTHOR = "by Jacob Stiltner"
+AUTHOR = "by Jake"
 
 try:
-    from loopmedic import VERSION as TRAY_VERSION   # loopmedic.py sits next to this file (/opt/loopmedic)
+    # loopmedic.py sits next to this file (/opt/loopmedic); it holds the one copy of the release key
+    from loopmedic import VERSION as TRAY_VERSION, verify_signature
 except Exception:
     TRAY_VERSION = "0"
+
+    def verify_signature(data, sig, key=None):   # can't check -> never install
+        return False
 
 # ------------------------------------------------------------------ updates
 # Only when the user clicks the version in the panel. Asks GitHub for the latest release, downloads
 # LoopMedic-Linux.tar.gz + .sig and refuses anything the LoopMedic release key didn't sign.
 REPO = "Jakestatefarm2020/LoopMedic"
-# Public half of the release signing key (RSA-3072); the private half never leaves the author's PC.
-KEY_N = int.from_bytes(base64.b64decode(
-    "90PksaPHuTI9JIRU4CFL7dWDKaUDSGOrGCzGP8uwaAW8UqZsEfGJY9aeQY9cI1NcPOrwDWSBJZgkYC3brpgKLwzt1RCtwGS4+cuB/bEsYfFj7y5wUv58k/iXxSwJ"
-    "hYZhrVBhnoU48g/FEL/oZyQrqJsLw139aAW54AxxFS4Q2fehI2nFuTiB6vRvOQILXvW756vnuccAILq1Duxfn+pZpfZq5111pfFopqaJaE1y9nEZ98trjDCgJuXI"
-    "9WSIS2enYprBs3Wh34tkbjrOV/pPjzHxiuZUD7i+xfS2UhMmUwTQ5ifyL3kmNO7mVnoKxshSen5JhEhhnN5XQCNa3Y3PcGEV+CTrZn4hs1aNp4PX7HZyA1nu6XFO"
-    "MVn8G5Sy+Meq4YxrvwZuQ1KPpReTIsyCv4gHhOfZJVgiNvHIvmH7L5TywQnYhV5EMc0rt/VJNw+fCOCjAeHdHWUpiaGb5WpAqziWP3ExDppYTjpGo7cmf38wHBxS"
-    "NomRqOl6WXpjLZnF"), "big")
-KEY_E = 65537
-SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
-
-
-def verify_signature(data, sig):
-    """RSA PKCS#1 v1.5 / SHA-256 check against the built-in release key (standard library only)."""
-    k = (KEY_N.bit_length() + 7) // 8
-    if len(sig) != k:
-        return False
-    di = SHA256_PREFIX + hashlib.sha256(data).digest()
-    expected = b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
-    return pow(int.from_bytes(sig, "big"), KEY_E, KEY_N).to_bytes(k, "big") == expected
-
-
 def version_tuple(v):
     try:
         return tuple(int(x) for x in v.strip().lstrip("vV").split("."))
@@ -103,26 +86,23 @@ def check_latest(current):
 
 
 def download_update(rel):
-    """Download + signature check + unpack. Returns the new setup_loopmedic.py, or raises with a readable message."""
+    """Download + signature check (a fast pre-filter: the root step checks again in a root-only folder).
+    Returns (package, sig) paths in a temp folder, or raises with a readable message."""
     if not rel.get("pkg") or not rel.get("sig"):
         raise RuntimeError("This release has no signed Linux package - download it from GitHub instead.")
     data = http_get(rel["pkg"])
-    sig = base64.b64decode(http_get(rel["sig"]).strip())
+    sig_text = http_get(rel["sig"]).strip()
+    sig = base64.b64decode(sig_text)
     if not verify_signature(data, sig):
         raise RuntimeError("The download FAILED the signature check, so it was not installed. Please tell the author.")
     work = tempfile.mkdtemp(prefix="loopmedic-update-")
     pkg = os.path.join(work, "LoopMedic-Linux.tar.gz")
     with open(pkg, "wb") as f:
         f.write(data)
-    with tarfile.open(pkg) as tar:
-        for m in tar.getmembers():   # nothing outside the folder, no links
-            if m.name.startswith("/") or ".." in m.name.split("/") or not (m.isfile() or m.isdir()):
-                raise RuntimeError("The package has an unexpected file in it - not installing.")
-        tar.extractall(work)
-    setup = os.path.join(work, "LoopMedic-Linux", "loopmedic", "setup_loopmedic.py")
-    if not os.path.exists(setup):
-        raise RuntimeError("The package has no setup script - download it from GitHub and run install.sh.")
-    return setup
+    sig_path = pkg + ".sig"
+    with open(sig_path, "wb") as f:
+        f.write(sig_text)
+    return pkg, sig_path
 
 
 def plain_notes(md):
@@ -575,10 +555,10 @@ class Panel(QWidget, Clickable):
             if fw > 5:
                 g.fillPath(rounded(QRectF(bar.x(), bar.y(), fw, bar.height()), 2.5), T.Accent if f["pump"] else T.Accent2)
             y += 22
-        empty = len(st.fans) - len(live)
         g.setPen(T.Dim)
-        if empty > 0:
-            g.drawText(QPointF(pad, y + asc), f"{empty} empty header{'' if empty == 1 else 's'} (0 rpm)")
+        # empty headers (0 rpm) aren't listed; say so only if nothing at all is spinning
+        if st.fans and not live:
+            g.drawText(QPointF(pad, y + asc), "No fans spinning (all headers 0 rpm)")
             y += 18
         if not st.fans:
             g.drawText(QPointF(pad, y + asc), "No fan data yet")
@@ -914,14 +894,15 @@ class TrayApp:
 
         def work():
             try:
-                setup = download_update(rel)
+                pkg, sig = download_update(rel)
             except (RuntimeError, OSError, urllib.error.URLError, ValueError, tarfile.TarError) as e:
                 msg = str(e)
                 self.later(lambda: self.tray.showMessage("LoopMedic update failed", msg, QSystemTrayIcon.Warning, 15000))
                 return
-            # pkexec asks for your password, then the new setup installs as root (settings kept)
-            r = subprocess.run(["pkexec", "/usr/bin/python3", setup, "--update-root", "--user", user, "--group", group],
-                               capture_output=True, text=True)
+            # pkexec asks for your password; the INSTALLED loopmedic.py (root-owned) copies the files into a
+            # root-only folder, checks signature + version again there, then runs the new setup (settings kept)
+            r = subprocess.run(["pkexec", "/usr/bin/python3", "/opt/loopmedic/loopmedic.py", "--apply-update", pkg, sig,
+                                "--user", user, "--group", group], capture_output=True, text=True)
 
             def after():
                 if r.returncode == 0:

@@ -65,7 +65,13 @@ The worker reads only **dates** from `control\` files and ignores everything els
    held 5 s, cuts the countdown short.
 6. Grace: no trips in the first `StartupGraceSeconds` (20), or for `RearmSeconds` (120) after a cancel.
 
-7. **Air cooler mode** (`CoolerType` = `air`): the CPU fan is watched with exactly the same rules; only the
+7. **Never spun since boot** (pump ≤ `PumpStoppedRpm` on every reading so far, so rule 2 is held - it could
+   be a speed cable on the wrong header): DEGRADED warning (important email). It trips anyway if the CPU
+   confirms the cooler is dead: ≥ `NeverSpunTripC` (0 = limit − 15, never below `CoolCpuTempC`) while CPU
+   load ≤ `NeverSpunMaxLoad` (25 %) for `CpuHotSeconds`. No load reading = warning only. A busy CPU is left
+   to rule 4. Boot-loop guard: if the last power-off was this rule (`last-poweroff.json` kind `neverspun`),
+   it only warns (tray + log, no email) until the pump reads OK once, which writes `cleared: true`.
+8. **Air cooler mode** (`CoolerType` = `air`): the CPU fan is watched with exactly the same rules; only the
    wording changes.
 
 All durations use a monotonic clock (Stopwatch), so a clock change can't delay a trip. A pause request is
@@ -125,6 +131,7 @@ important ones retry for ~15 min, others are capped at 6 an hour). A trip never 
 | A fake or altered update (hijacked account, swapped download) | refused unless signed with the release key, which never leaves the author's PC. The first download from the Releases page is trusted as-is (HTTPS from GitHub). |
 | Sensor noise / bad tach | jump rule; only a *stopped* pump trips |
 | The mail password on disk | encrypted with DPAPI (this PC only) as soon as it is seen; admin-only file. An admin on the PC can still recover it - use an app password. |
+| Other software running as the user swapping the update in %TEMP% before the admin prompt | the tray hands the files to the INSTALLED `LoopMedic.exe --apply-update` (admin-only folder), which copies them into an admin-only `staging\`, checks the signature again there with its own built-in key, refuses a version not newer than itself (`--allow-downgrade` / `-AllowDowngrade` for deliberate rollbacks; the tray never passes it), refuses zip paths outside the folder, and starts the new `Update-LoopMedic.ps1` from staging with Windows PowerShell's full path and only Windows' module folders. Linux: the same in `/opt/loopmedic/loopmedic.py --apply-update`, staging in `/var/lib/loopmedic/staging` (root, 700). |
 | A dead or slow mail server | sends run on their own thread with timeouts; trips and power-offs never wait for them |
 | Pulse-count mismatch (rpm wrong by 2×) | only a *stopped* pump trips. Slow = warning. |
 | A pump spinning without flow | CPU temperature trip only |

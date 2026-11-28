@@ -5,6 +5,9 @@
 #   2. takes your current settings (C:\ProgramData\LoopMedic\config.json) and adds any setting the new
 #      version introduced, with its default
 #   3. installs (Install-LoopMedic.ps1): watchdog and tray restart on the new version
+# It refuses a version that isn't newer than the installed one. -AllowDowngrade skips only that check, for a
+# deliberate rollback (Install.bat from an older release works too). The tray never passes it.
+param([switch]$AllowDowngrade)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $dest = 'C:\ProgramData\LoopMedic'
@@ -15,6 +18,17 @@ try {
     }
     $current = Join-Path $dest 'config.json'
     if (-not (Test-Path $current)) { throw "LoopMedic isn't installed on this PC - run Install.bat instead." }
+
+    # not older than what's installed (unless -AllowDowngrade)
+    $m = Select-String -Path (Join-Path $here 'src\LoopMedic.cs') -Pattern 'public const string Version = "(\d+\.\d+\.\d+)";' | Select-Object -First 1
+    if (-not $m) { throw "Can't read this package's version." }
+    $newV = [version]$m.Matches[0].Groups[1].Value
+    $exe = Join-Path $dest 'LoopMedic.exe'
+    if ((Test-Path $exe) -and -not $AllowDowngrade) {
+        $v = [Reflection.AssemblyName]::GetAssemblyName($exe).Version
+        $nowV = New-Object Version $v.Major, $v.Minor, $v.Build
+        if ($newV -le $nowV) { throw "This package is LoopMedic $newV, not newer than the installed $nowV. (Going back on purpose? Run this with -AllowDowngrade, or Install.bat from the older release.)" }
+    }
 
     Write-Host 'Updating LoopMedic - your settings are kept.' -ForegroundColor Cyan
     Get-ChildItem $here -Recurse -File | Unblock-File

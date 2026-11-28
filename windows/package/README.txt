@@ -2,7 +2,8 @@
   LOOPMEDIC 2.3
   by Jacob Stiltner
 
-  Powers your PC off if your AIO pump stops, before the CPU cooks.
+  Powers your PC off if your CPU cooler (AIO pump or air cooler fan)
+  stops, instead of letting the CPU sit at its thermal limit unnoticed.
 ==========================================================================
 
   PLEASE READ: NO WARRANTY
@@ -466,6 +467,10 @@ CHANGE SETTINGS / REMOVE
                              turn it off - LoopMedic uses the table's
                              value for your CPU (or 95 C) instead.
     CpuHotSeconds (30)       how long the CPU must stay at the limit
+    NeverSpunTripC (0)       pump read 0 since boot: power off anyway if
+                             the CPU reaches this at light load (0 = the
+                             limit minus 15 C)
+    NeverSpunMaxLoad (25)    ...and the CPU is at most this % busy
     ShutdownDelaySeconds (30)      the alarm's countdown
     HotShutdownDelaySeconds (5)    the countdown when already too hot
     CoolerType ("aio")       "air" = watch the CPU fan instead of a pump

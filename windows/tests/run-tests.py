@@ -7,7 +7,7 @@ Every run is a dry run. Needs: Python 3.8+, a built bin\\LoopMedic.exe (run buil
     python tests\\run-tests.py            all scenarios (in parallel, ~2.5 min)
     python tests\\run-tests.py spike cancel   only the ones whose names contain these words
 """
-import json, os, shutil, socket, socketserver, subprocess, sys, tempfile, threading, time
+import base64, json, os, re, shutil, socket, socketserver, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +53,8 @@ class Rig:
         s = self.state
         sensors = [{"id": TEMP_ID, "name": "Core (Tctl/Tdie)", "type": "Temperature", "hw": "Cpu", "value": s["temp"]},
                    {"id": "/lpc/fake/0/fan/1", "name": "Fan #2", "type": "Fan", "hw": "SuperIO", "value": 1200}]
+        if s.get("load") is not None:
+            sensors.append({"id": "/amdcpu/0/load/0", "name": "CPU Total", "type": "Load", "hw": "Cpu", "value": s["load"]})
         if s["pumpPresent"]:
             sensors.insert(0, {"id": PUMP_ID, "name": "Fan #1", "type": "Fan", "hw": "SuperIO", "value": s["pump"]})
         doc = {"cpuName": s["cpuName"], "sensors": sensors,
@@ -133,6 +135,41 @@ def t_pump_stops_cool_then_warms():
     expect(s1 == "WATCHING", f"16 s stopped while cool: {s1}, want WATCHING (60 s allowed)", p)
     expect(s2["state"] == "TRIPPED", f"after CPU warmed: {s2['state']}, want TRIPPED", p)
     expect("allowing 60s" in r.log(), "cool grace logged", p)
+    return p
+
+
+def t_stall_with_failed_reads_trips():
+    r = Rig("stall_failed_reads", temp=70).start(duration=34)
+    time.sleep(7)
+    for _ in range(4):                      # dying tach: 0, no reading, 0, no reading ... (~20 s, polls every 2 s)
+        r.push(pump=0, pumpPresent=True); time.sleep(2.5)
+        r.push(pumpPresent=False); time.sleep(2.5)
+    s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "TRIPPED" and s.get("tripKind") == "pump", f"0 / failed reads: {s['state']}/{s.get('tripKind')}, want a pump trip", p)
+    return p
+
+
+def t_single_failed_read_ignored():
+    r = Rig("single_failed_read", temp=50).start(duration=18)
+    time.sleep(7); r.push(pumpPresent=False)
+    time.sleep(2.5); r.push(pumpPresent=True)
+    time.sleep(5); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "ARMED", f"one failed read while healthy: {s['state']}, want ARMED", p)
+    expect("stopped:" not in log and "would power off" not in log, "no stall started, no trip", p)
+    return p
+
+
+def t_stall_then_real_recovery():
+    r = Rig("stall_recovers", temp=50).start(duration=24)
+    time.sleep(7); r.push(pump=0)
+    time.sleep(3); r.push(pumpPresent=False)  # a failed read mid-stall keeps the timer
+    time.sleep(2); r.push(pumpPresent=True, pump=2400)
+    time.sleep(10); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect("recovered" in log, "real reading above the stopped line -> recovered", p)
+    expect(s["state"] == "ARMED" and "would power off" not in log, f"timer cleared, no trip ({s['state']})", p)
     return p
 
 
@@ -314,6 +351,232 @@ def t_monthly_selftest():
     expect("Monthly self-test OK" in log, "first self-test OK", p)
     expect("Monthly self-test FAILED" in log, "second self-test FAILED once permission is gone", p)
     expect(any("self-test FAILED" in d for d in st.get("degraded", [])), "failed self-test shows as DEGRADED", p)
+    return p
+
+
+def t_never_spun_hot_idle_trips():
+    r = Rig("ns_trip", pump=0, temp=75, CpuHotSeconds=6)
+    r.push(load=10)                         # dead pump from boot, CPU hot while nearly idle
+    r.start(duration=20)
+    time.sleep(16); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "TRIPPED" and s.get("tripKind") == "neverspun", f"never-spun trip: {s['state']}/{s.get('tripKind')}", p)
+    expect("hasn't spun since boot" in log and "would power off" in log, "trip logged with its reason", p)
+    return p
+
+
+def t_never_spun_cool_warns_only():
+    r = Rig("ns_cool", pump=0, temp=45, CpuHotSeconds=6)
+    r.push(load=10)                         # cable on the wrong header, cooler fine
+    r.start(duration=16)
+    time.sleep(12); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "DEGRADED", f"cool CPU: {s['state']}, want DEGRADED (warning only)", p)
+    expect("since boot - cable moved?" in log and "would power off" not in log, "warned, never tripped", p)
+    return p
+
+
+def t_never_spun_busy_cpu_no_trip():
+    r = Rig("ns_busy", pump=0, temp=78, CpuHotSeconds=6)
+    r.push(load=80)                         # misplugged pump while gaming: hot because busy
+    r.start(duration=18)
+    time.sleep(14); s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "DEGRADED", f"busy CPU: {s['state']}, want DEGRADED", p)
+    expect("would power off" not in r.log(), "a busy CPU is left to the normal CPU trip", p)
+    return p
+
+
+def t_never_spun_no_load_sensor():
+    r = Rig("ns_noload", pump=0, temp=75, CpuHotSeconds=6).start(duration=16)
+    time.sleep(12); s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "DEGRADED" and "would power off" not in r.log(), f"no load reading -> warning only ({s['state']})", p)
+    return p
+
+
+def t_never_spun_boot_loop_guard():
+    r = Rig("ns_guard", pump=0, temp=75, CpuHotSeconds=6)
+    r.push(load=10)
+    r.write_json("last-poweroff.json", {"at": datetime.now().astimezone().isoformat(), "reason": "pump hasn't spun since boot",
+                                        "kind": "neverspun", "reported": False})
+    r.start(duration=26)
+    time.sleep(16); s1 = r.status()
+    r.push(pump=2400)                       # pump fixed -> guard cleared
+    r.wait(); log1 = r.log(); p = []
+    with open(os.path.join(r.root, "last-poweroff.json")) as f:
+        lp = json.load(f)
+    expect(s1["state"] == "DEGRADED", f"guarded boot: {s1['state']}, want DEGRADED (no trip)", p)
+    expect(any("already powered off once" in d for d in s1.get("degraded", [])), "tray gets the guard warning", p)
+    expect("NOT powering off" in log1 and "would power off" not in log1, "alarm only, no power-off", p)
+    expect(lp.get("cleared") is True and "armed again" in log1, f"pump spun -> guard cleared ({lp})", p)
+    # next boot with the pump dead again: the rule works normally
+    r.push(pump=0)
+    r.start(duration=20)
+    time.sleep(16); s2 = r.status()
+    r.wait()
+    expect(s2.get("tripKind") == "neverspun", f"after the guard cleared it trips again ({s2['state']}/{s2.get('tripKind')})", p)
+    return p
+
+
+# ---------------------------------------------------------------- updates: a throwaway signing key
+# Plain-Python RSA, made fresh for each test run. The real release key is never used by the tests.
+_TEST_KEY = None
+_TEST_KEY_LOCK = threading.Lock()
+
+
+def test_key():
+    with _TEST_KEY_LOCK:                     # scenarios run in parallel: make the key once
+        if not _TEST_KEY:
+            _make_test_key()
+        return _TEST_KEY
+
+
+def _make_test_key():
+    global _TEST_KEY
+    import hashlib, random
+    rnd = random.SystemRandom()
+
+    def is_prime(n):
+        if n % 2 == 0:
+            return False
+        d, r = n - 1, 0
+        while d % 2 == 0:
+            d, r = d // 2, r + 1
+        for _ in range(24):
+            x = pow(rnd.randrange(2, n - 1), d, n)
+            if x in (1, n - 1):
+                continue
+            for _ in range(r - 1):
+                x = pow(x, 2, n)
+                if x == n - 1:
+                    break
+            else:
+                return False
+        return True
+
+    def prime(bits):
+        while True:
+            c = rnd.getrandbits(bits) | (3 << (bits - 2)) | 1
+            if all(c % p for p in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)) and is_prime(c):
+                return c
+    e = 65537
+    while True:
+        p, q = prime(512), prime(512)
+        phi = (p - 1) * (q - 1)
+        if p != q and phi % e:
+            break
+    n = p * q
+    path = os.path.join(BASE, "test-key.json")
+    k = (n.bit_length() + 7) // 8
+    with open(path, "w") as f:
+        json.dump({"n": base64.b64encode(n.to_bytes(k, "big")).decode(), "e": base64.b64encode(e.to_bytes(3, "big")).decode()}, f)
+    _TEST_KEY = (n, pow(e, -1, phi), path)
+
+
+def sign(data):
+    import hashlib
+    n, d, _ = test_key()
+    k = (n.bit_length() + 7) // 8
+    di = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(data).digest()
+    em = b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
+    return base64.b64encode(pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big"))
+
+
+def repo_version():
+    m = re.search(VERSION_RE, open(VERSION_SRC, encoding="utf-8").read(), re.M)
+    return m.group(1)
+
+
+VERSION_SRC = os.path.join(REPO, "src", "LoopMedic.cs")
+VERSION_RE = r'public const string Version = "(\d+\.\d+\.\d+)";'
+
+
+def update_pkg(name, version, extra=None, tamper=False):
+    """A small signed LoopMedic.zip (the parts --apply-update looks at). Returns (folder, zip, sig)."""
+    import zipfile
+    d = os.path.join(BASE, name)
+    os.makedirs(d, exist_ok=True)
+    z = os.path.join(d, "LoopMedic.zip")
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("LoopMedic/src/LoopMedic.cs", f'class X {{ public const string Version = "{version}"; }}\n')
+        f.writestr("LoopMedic/Update-LoopMedic.ps1", "Write-Host 'test package'\n")
+        for k, v in (extra or {}).items():
+            f.writestr(k, v)
+    data = open(z, "rb").read()
+    with open(z + ".sig", "wb") as f:
+        f.write(sign(data))
+    if tamper:                               # changed after signing (e.g. swapped before the admin prompt)
+        with zipfile.ZipFile(z, "a") as f:
+            f.writestr("LoopMedic/evil.ps1", "Write-Host 'not signed'\n")
+    return d, z, z + ".sig"
+
+
+def apply_update(d, z, sig, *extra, dry=True, key=True):
+    args = [EXE, "--apply-update", "--package", z, "--sig", sig]
+    if dry:
+        args += ["--apply-dry-run", "--root", d]
+    if key:
+        args += ["--test-key", test_key()[2]]
+    r = subprocess.run(args + list(extra), capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    return r.returncode, r.stdout + r.stderr
+
+
+def t_update_newer_accepted():
+    d, z, sig = update_pkg("upd_newer", "9.9.9")
+    rc, out = apply_update(d, z, sig)
+    p = []
+    expect(rc == 0 and "would run" in out, f"signed newer package: rc {rc}, {out.strip()[-200:]}", p)
+    expect(os.path.exists(os.path.join(d, "staging", "x", "LoopMedic", "Update-LoopMedic.ps1")), "unpacked in staging", p)
+    expect("-AllowDowngrade" not in out, "no downgrade switch passed on", p)
+    return p
+
+
+def t_update_tampered_refused():
+    d, z, sig = update_pkg("upd_tampered", "9.9.9", tamper=True)
+    rc, out = apply_update(d, z, sig)
+    p = []
+    expect(rc == 2 and "signature" in out, f"tampered package: rc {rc}, want 2 (signature)", p)
+    expect(not os.path.exists(os.path.join(d, "staging", "x")), "nothing unpacked", p)
+    return p
+
+
+def t_update_older_refused_and_allow_downgrade():
+    p = []
+    for v in ("1.0.0", repo_version()):
+        d, z, sig = update_pkg("upd_old_" + v.replace(".", "_"), v)
+        rc, out = apply_update(d, z, sig)
+        expect(rc == 3 and "not newer" in out, f"package {v}: rc {rc}, want 3 (not newer)", p)
+    d, z, sig = update_pkg("upd_downgrade", "1.0.0")
+    rc, out = apply_update(d, z, sig, "--allow-downgrade")
+    expect(rc == 0 and "-AllowDowngrade" in out, f"--allow-downgrade: rc {rc}, {out.strip()[-200:]}", p)
+    return p
+
+
+def t_update_path_escape_refused():
+    d, z, sig = update_pkg("upd_escape", "9.9.9", extra={"../escaped.txt": "x"})
+    rc, out = apply_update(d, z, sig)
+    p = []
+    expect(rc == 4 and "unexpected file" in out, f"zip with ../: rc {rc}, want 4", p)
+    expect(not os.path.exists(os.path.join(d, "staging", "escaped.txt")), "nothing written outside", p)
+    return p
+
+
+def t_update_test_switches_need_dry_run():
+    d, z, sig = update_pkg("upd_real_testkey", "9.9.9")
+    rc, out = apply_update(d, z, sig, dry=False)          # a real run handed the test key
+    p = []
+    expect(rc == 6 and "can't be used for a real update" in out, f"test key on a real update: rc {rc}, want 6", p)
+    return p
+
+
+def t_update_keys_match():
+    tray = open(os.path.join(REPO, "tray", "LoopMedicTray.cs"), encoding="utf-8").read()
+    exe = open(VERSION_SRC, encoding="utf-8").read()
+    a = re.findall(r'const string KeyModulus = "([^"]+)";', tray)
+    b = re.findall(r'const string KeyModulus = "([^"]+)";', exe)
+    p = []
+    expect(len(a) == 1 and len(b) == 1 and a == b, "tray and LoopMedic.exe carry the same release key", p)
     return p
 
 

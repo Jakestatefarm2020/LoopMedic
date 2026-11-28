@@ -9,6 +9,8 @@
   "CoolCpuTempC": 60,
   "CpuMaxTempC": 85,
   "CpuHotSeconds": 30,
+  "NeverSpunTripC": 0,
+  "NeverSpunMaxLoad": 25,
   "PollSeconds": 2,
   "StartupGraceSeconds": 20,
   "ShutdownDelaySeconds": 30,

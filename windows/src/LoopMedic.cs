@@ -35,16 +35,17 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyDescription("LoopMedic watchdog - powers the PC off if the AIO pump stops or the CPU overheats")]
 [assembly: AssemblyCompany("Jacob Stiltner")]
 [assembly: AssemblyCopyright("(c) 2026 Jacob Stiltner")]
-[assembly: AssemblyVersion("2.3.1.0")]
+[assembly: AssemblyVersion("2.3.2.0")]
 
 namespace LoopMedic
 {
     // ------------------------------------------------------------------ options
     class Options
     {
-        public string Mode = "supervise";     // supervise | worker | poweroff | testmail
+        public string Mode = "supervise";     // supervise | worker | poweroff | testmail | applyupdate
         public string Root;
-        public bool DryRun, Once, NoEventLog, SelfTestRun;
+        public bool DryRun, Once, NoEventLog, SelfTestRun, RootGiven, AllowDowngrade, ApplyDryRun;
+        public string Package, Signature, TestKey;   // --apply-update
         public int Duration, SimulateStall, SimulateHealthy, Delay = 30, CrashAfter, HangAfter, Parent;
         public double SimulatePump = -1, SelfTestIntervalHours = 24 * 30, SelfTestMinUptime = 600;
         public string FakeSensors, TripStarted, Reason = "", Kind = "pump";
@@ -65,9 +66,15 @@ namespace LoopMedic
                     case "--supervise": o.Mode = "supervise"; pass = false; break;
                     case "--poweroff": o.Mode = "poweroff"; pass = false; break;
                     case "--parent": o.Parent = ParseInt(next()); pass = false; break;
-                    case "--root": o.Root = next(); o.PassThrough.Add(k); o.PassThrough.Add(o.Root); pass = false; break;
+                    case "--root": o.Root = next(); o.RootGiven = true; o.PassThrough.Add(k); o.PassThrough.Add(o.Root); pass = false; break;
                     case "--dry-run": o.DryRun = true; break;
                     case "--test-mail": o.Mode = "testmail"; pass = false; break;
+                    case "--apply-update": o.Mode = "applyupdate"; pass = false; break;
+                    case "--package": o.Package = next(); pass = false; break;
+                    case "--sig": o.Signature = next(); pass = false; break;
+                    case "--allow-downgrade": o.AllowDowngrade = true; pass = false; break;
+                    case "--apply-dry-run": o.ApplyDryRun = true; pass = false; break;
+                    case "--test-key": o.TestKey = next(); pass = false; break;
                     case "--once": o.Once = true; break;
                     case "--no-eventlog": o.NoEventLog = true; break;
                     case "--self-test": o.SelfTestRun = true; break;
@@ -97,7 +104,7 @@ namespace LoopMedic
 
     static class Program
     {
-        public const string Version = "2.3.1";
+        public const string Version = "2.3.2";
         public static Options Opt;
 
         static int Main(string[] args)
@@ -109,6 +116,7 @@ namespace LoopMedic
             {
                 if (Opt.Mode == "poweroff") return PowerOff.Run(Opt);
                 if (Opt.Mode == "testmail") return Mail.TestNow(Paths.Root);
+                if (Opt.Mode == "applyupdate") return ApplyUpdate.Run(Opt);
                 if (Opt.Mode == "worker" || Opt.Once) return Watchdog.Run(Opt);
                 return Supervisor.Run(Opt);
             }
@@ -1079,6 +1087,14 @@ namespace LoopMedic
                 Log.Write("CpuMaxTempC was off or out of range - the temperature trip can't be turned off; using " + F(cpuMaxTempC) + " C (" + limitSource + ").");
             }
             bool tempCheckOn = cpuTemp != null;
+            // A pump that has read "stopped" since boot isn't trusted (a misplugged speed cable reads 0 too), so the
+            // normal pump trip waits for one good reading. Second path: it trips anyway if the CPU confirms the cooler
+            // is dead - warm (NeverSpunTripC, 0 = the limit minus 15) while lightly loaded (<= NeverSpunMaxLoad %),
+            // for CpuHotSeconds. Never below CoolCpuTempC. A busy CPU (gaming) is left to the normal CPU trip.
+            double neverSpunC = Cfg("NeverSpunTripC", 0);
+            if (neverSpunC <= 0) neverSpunC = cpuMaxTempC - 15;
+            neverSpunC = Math.Max(neverSpunC, coolCpuTempC);
+            double neverSpunMaxLoad = Cfg("NeverSpunMaxLoad", 25);
 
             var fanSensors = src.Sensors.Where(s => s.Type == "Fan" && s.HardwareType != "Cpu").ToList();
             SensorInfo cpuLoad = src.Sensors.FirstOrDefault(s => s.Type == "Load" && s.HardwareType == "Cpu" && s.Name == "CPU Total");
@@ -1138,9 +1154,15 @@ namespace LoopMedic
                 try { Json.WriteAtomic(Paths.LastPowerOff, lastOff); } catch { }
             }
 
+            // Boot-loop guard: the last power-off was this never-spun rule and the pump hasn't spun since -> this
+            // boot only warns for it. Cleared (in last-poweroff.json) the first time the pump reads OK.
+            bool neverSpunGuard = lastOff != null && Json.Str(lastOff, "kind") == "neverspun" && !Json.Bool(lastOff, "cleared");
+            if (neverSpunGuard) Log.Write("Last power-off was for a " + pw + " that never spun. Not powering off again for that until the " + pw + " spins (the CPU trip still works).");
+
             // ---- state ----
             double started = Clock.Mono;
-            double? pumpBadSince = null, hotSince = null, pumpNullSince = null, tempNullSince = null, pumpSlowSince = null;
+            double? pumpBadSince = null, hotSince = null, pumpNullSince = null, tempNullSince = null, pumpSlowSince = null, neverSpunSince = null;
+            bool neverSpunHeld = false;   // the guard stopped a never-spun trip this boot
             bool pumpEverOk = false, pumpSlowReported = false;
             double lastHeartbeat = Clock.Mono, cooldownUntil = 0, lastCheck = Clock.Mono;
             DateTime lastCheckWall = Clock.Now;
@@ -1153,7 +1175,7 @@ namespace LoopMedic
             DateTime lastTestHandled = Clock.Now, lastCancelHandled = Clock.Now;
             bool wasPaused = false, stallSimDone = false;
             double pauseEndMono = 0; DateTime pauseFileWritten = DateTime.MinValue; DateTime? pauseUntilWall = null;
-            string lastDegradedText = "";
+            string lastDegradedText = "", lastDegradedMail = "";
             // monthly self-test
             Process selfTestProc = null; double selfTestStarted = 0;
             Dictionary<string, object> selfTest = Json.ReadFile(Paths.SelfTest, 16 * 1024);
@@ -1238,7 +1260,18 @@ namespace LoopMedic
                 if (wall.Date != day) { day = wall.Date; dayMaxTemp = null; dayMinPump = null; }
                 if (temp.HasValue && (!dayMaxTemp.HasValue || temp > dayMaxTemp)) dayMaxTemp = temp;
                 if (rpm.HasValue && (!dayMinPump.HasValue || rpm < dayMinPump)) dayMinPump = rpm;
-                if (rpm.HasValue && rpm.Value > pumpStoppedRpm) pumpEverOk = true;
+                if (rpm.HasValue && rpm.Value > pumpStoppedRpm)
+                {
+                    pumpEverOk = true;
+                    if (neverSpunGuard)
+                    {
+                        neverSpunGuard = neverSpunHeld = false;
+                        lastOff["cleared"] = true;
+                        try { Json.WriteAtomic(Paths.LastPowerOff, lastOff); } catch { }
+                        Log.Write(Pw + " is spinning (" + F(rpm) + " rpm) - the never-spun power-off is armed again.");
+                    }
+                }
+                double? load = cpuLoad != null ? cpuLoad.Read() : null;
                 if (!rpm.HasValue && (pump != null || simulating)) { if (!pumpNullSince.HasValue) pumpNullSince = now; } else pumpNullSince = null;
                 if (!temp.HasValue && cpuTemp != null) { if (!tempNullSince.HasValue) tempNullSince = now; } else tempNullSince = null;
 
@@ -1324,7 +1357,11 @@ namespace LoopMedic
                 if (tempNullSince.HasValue && now - tempNullSince.Value >= 30) degraded.Add("CPU temperature not responding.");
                 bool inGrace = elapsed < graceSeconds;
                 bool pumpNeverSpun = (pump != null || simulating) && !pumpEverOk && !inGrace && rpm.HasValue;
-                if (pumpNeverSpun) degraded.Add(Pw + " has read " + F(rpm) + " rpm since boot - cable moved? " + Pw + " trip held; CPU temperature still watched.");
+                string neverSpunLine = Pw + " has read " + F(rpm) + " rpm since boot - cable moved? " + Pw + " trip held until it spins; the CPU trip and a hot-at-idle check still work.";
+                if (pumpNeverSpun) degraded.Add(neverSpunLine);
+                // the guard's warning: tray notification + log only - no email (whoever powers the PC back on is at it)
+                string heldLine = Pw + " hasn't spun since boot and the CPU got hot at light load. LoopMedic already powered off once for this, so it won't again until the " + pw + " spins - check the " + pw + ".";
+                if (neverSpunHeld) degraded.Add(heldLine);
                 // Slow but spinning: warn, don't power off (eco modes, or a pump that reports a different pulse
                 // count, can read low). The CPU temperature trip still covers a pump that's really failing.
                 if (pumpEverOk && rpm.HasValue && rpm.Value > pumpStoppedRpm && rpm.Value < pumpMinRpm)
@@ -1340,26 +1377,32 @@ namespace LoopMedic
                 string degradedText = string.Join(" | ", degraded);
                 if (degradedText != lastDegradedText)
                 {
-                    if (degradedText.Length > 0)
-                    {
-                        Log.Write("DEGRADED: " + degradedText); Events.Warn(Events.Degraded, "Protection reduced: " + degradedText);
-                        Mail.Send("Warning - " + degraded[0].Split(':')[0], "LoopMedic warning on this PC:\r\n\r\n" + string.Join("\r\n", degraded) +
-                                  "\r\n\r\nNothing has been powered off. You'll get another email when this clears.", false);
-                    }
-                    else if (lastDegradedText.Length > 0)
-                    {
-                        Log.Write("Protection back to normal."); Events.Info(Events.Normal, "Protection back to normal.");
-                        Mail.Send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.", false);
-                    }
+                    if (degradedText.Length > 0) { Log.Write("DEGRADED: " + degradedText); Events.Warn(Events.Degraded, "Protection reduced: " + degradedText); }
+                    else if (lastDegradedText.Length > 0) { Log.Write("Protection back to normal."); Events.Info(Events.Normal, "Protection back to normal."); }
                     lastDegradedText = degradedText;
+                }
+                // email: everything except the guard's line; the never-spun warning is important (retried)
+                var mailLines = degraded.Where(d => d != heldLine).ToList();
+                string mailText = string.Join(" | ", mailLines);
+                if (mailText != lastDegradedMail)
+                {
+                    if (mailText.Length > 0)
+                        Mail.Send("Warning - " + mailLines[0].Split(':')[0], "LoopMedic warning on this PC:\r\n\r\n" + string.Join("\r\n", mailLines) +
+                                  "\r\n\r\nNothing has been powered off. You'll get another email when this clears.", mailLines.Contains(neverSpunLine));
+                    else if (lastDegradedMail.Length > 0)
+                        Mail.Send("Back to normal", "The earlier LoopMedic warning has cleared. Protection is back to normal.", false);
+                    lastDegradedMail = mailText;
                 }
 
                 // ---- checks ----
                 if (!inGrace && !paused && trip == null && now >= cooldownUntil)
                 {
-                    if ((pump != null || simulating) && rpm.HasValue && pumpEverOk)
+                    // Once a stall has started, a failed read counts as still stopped: a dying tach that
+                    // alternates 0 / no reading must not keep restarting the window. Only a real reading above
+                    // the stopped line clears it. (pumpBadSince empty here means rpm has a value.)
+                    if ((pump != null || simulating) && pumpEverOk && (rpm.HasValue || pumpBadSince.HasValue))
                     {
-                        if (rpm.Value <= pumpStoppedRpm)
+                        if (!rpm.HasValue || rpm.Value <= pumpStoppedRpm)
                         {
                             // CPU cool -> allow longer (a firmware flash or fan calibration stops the pump briefly).
                             // Once the CPU warms past CoolCpuTempC the normal short window applies.
@@ -1385,6 +1428,38 @@ namespace LoopMedic
                         }
                     }
                     else pumpBadSince = null;
+
+                    // never spun since boot + CPU hot at light load = the cooler really is dead
+                    bool neverSpunHot = (pump != null || simulating) && !pumpEverOk && rpm.HasValue && rpm.Value <= pumpStoppedRpm
+                                        && temp.HasValue && temp.Value >= neverSpunC && load.HasValue && load.Value <= neverSpunMaxLoad;
+                    if (neverSpunHot && !neverSpunHeld)
+                    {
+                        if (!neverSpunSince.HasValue)
+                        {
+                            neverSpunSince = now;
+                            Log.Write(Pw + " hasn't spun since boot and the CPU is " + F(temp) + " C at " + F(load) + "% load - watching.");
+                        }
+                        else if (now - neverSpunSince.Value >= cpuHotSeconds)
+                        {
+                            if (neverSpunGuard)
+                            {
+                                neverSpunHeld = true;
+                                Log.Write("NOT powering off: " + pw + " hasn't spun since boot, CPU " + F(temp) + " C at " + F(load) + "% load - already powered off once for this (boot-loop guard).");
+                            }
+                            else
+                            {
+                                trip = Protect("neverspun", pw + " hasn't spun since boot, CPU " + F(temp) + " C at " + F(load) + "% load", delaySeconds, now, wall);
+                                pumpBadSince = null; hotSince = null;
+                                cooldownUntil = now + rearmSeconds;
+                            }
+                            neverSpunSince = null;
+                        }
+                    }
+                    else if (neverSpunSince.HasValue && !neverSpunHot)
+                    {
+                        Log.Write("No longer hot at light load (CPU " + F(temp) + " C, " + F(load) + "% load).");
+                        neverSpunSince = null;
+                    }
 
                     if (tempCheckOn && trip == null && temp.HasValue)
                     {
@@ -1442,7 +1517,7 @@ namespace LoopMedic
                 {
                     bool settled = elapsed >= healthWarmup && now - lastWakeMono >= healthWarmup;
                     if (settled && !paused && trip == null && pumpEverOk && !pumpBadSince.HasValue && rpm.HasValue && rpm.Value > pumpStoppedRpm)
-                        health.Add(rpm.Value, temp, cpuLoad != null ? cpuLoad.Read() : null);
+                        health.Add(rpm.Value, temp, load);
                     health.Tick(wall, now);
                 }
 
@@ -1585,6 +1660,154 @@ namespace LoopMedic
         {
             if (!v.HasValue) return "-";
             return Math.Round(v.Value, 1).ToString("0.#", CultureInfo.InvariantCulture);
+        }
+    }
+
+    // ------------------------------------------------------------------ update: the elevated step
+    // The tray downloads + checks the release in the user's %TEMP% (a fast pre-filter), then runs THIS - the
+    // installed copy in C:\ProgramData\LoopMedic, which only admins can change - as admin:
+    //   LoopMedic.exe --apply-update --package <zip> --sig <sig> [--allow-downgrade]
+    // Anything in %TEMP% could be swapped by other programs running as the user before the admin prompt, so
+    // nothing from there is trusted: the package is copied into an admin-only staging folder, its signature is
+    // checked again there with the key built into this exe, it must be newer than this exe, and only then is
+    // its Update-LoopMedic.ps1 started - from staging. --apply-dry-run (tests) does everything except start it.
+    static class ApplyUpdate
+    {
+        const string KeyModulus = "90PksaPHuTI9JIRU4CFL7dWDKaUDSGOrGCzGP8uwaAW8UqZsEfGJY9aeQY9cI1NcPOrwDWSBJZgkYC3brpgKLwzt1RCtwGS4+cuB/bEsYfFj7y5wUv58k/iXxSwJhYZhrVBhnoU48g/FEL/oZyQrqJsLw139aAW54AxxFS4Q2fehI2nFuTiB6vRvOQILXvW756vnuccAILq1Duxfn+pZpfZq5111pfFopqaJaE1y9nEZ98trjDCgJuXI9WSIS2enYprBs3Wh34tkbjrOV/pPjzHxiuZUD7i+xfS2UhMmUwTQ5ifyL3kmNO7mVnoKxshSen5JhEhhnN5XQCNa3Y3PcGEV+CTrZn4hs1aNp4PX7HZyA1nu6XFOMVn8G5Sy+Meq4YxrvwZuQ1KPpReTIsyCv4gHhOfZJVgiNvHIvmH7L5TywQnYhV5EMc0rt/VJNw+fCOCjAeHdHWUpiaGb5WpAqziWP3ExDppYTjpGo7cmf38wHBxSNomRqOl6WXpjLZnF";
+        const string KeyExponent = "AQAB";
+        const long MaxPackage = 64L * 1024 * 1024;
+
+        class Refused : Exception { public int Code; public Refused(int code, string msg) : base(msg) { Code = code; } }
+
+        public static int Run(Options o)
+        {
+            bool dry = o.ApplyDryRun;
+            try
+            {
+                if (!dry)
+                {
+                    if (o.RootGiven || o.TestKey != null) throw new Refused(6, "--root / --test-key can't be used for a real update.");
+                    if (!new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent())
+                            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+                        throw new Refused(5, "This needs to run as administrator.");
+                    string installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LoopMedic");
+                    if (!string.Equals(Path.GetFullPath(Paths.Root).TrimEnd('\\'), Path.GetFullPath(installed).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                        throw new Refused(6, "Updates only run from the installed copy in " + installed + ".");
+                }
+                if (string.IsNullOrEmpty(o.Package) || string.IsNullOrEmpty(o.Signature)) throw new Refused(6, "--package and --sig are needed.");
+                var fi = new FileInfo(o.Package);
+                if (!fi.Exists || fi.Length > MaxPackage || !File.Exists(o.Signature) || new FileInfo(o.Signature).Length > 64 * 1024)
+                    throw new Refused(4, "The downloaded package is missing or too big - not installing.");
+
+                Say("Checking the update in a protected folder...");
+                string stage = Path.Combine(Paths.Root, "staging");
+                MakeStaging(stage, dry);
+                string zip = Path.Combine(stage, "LoopMedic.zip"), sig = Path.Combine(stage, "LoopMedic.zip.sig");
+                File.Copy(o.Package, zip);
+                File.Copy(o.Signature, sig);
+                // from here on, only the staged copies are read
+                byte[] data = File.ReadAllBytes(zip), s;
+                try { s = Convert.FromBase64String(File.ReadAllText(sig).Trim()); }
+                catch { throw new Refused(2, "The signature file is damaged - not installing."); }
+                if (!Verify(data, s, dry ? o.TestKey : null))
+                    throw new Refused(2, "The package FAILED the signature check in the protected folder - not installing. Please tell the author.");
+
+                string x = Path.Combine(stage, "x");
+                Extract(zip, x);
+                string pkgDir = Path.Combine(x, "LoopMedic");
+                string src = Path.Combine(pkgDir, "src", "LoopMedic.cs"), script = Path.Combine(pkgDir, "Update-LoopMedic.ps1");
+                if (!File.Exists(src) || !File.Exists(script)) throw new Refused(4, "The package has no updater - download it from GitHub and run Install.bat.");
+                var m = Regex.Match(File.ReadAllText(src), "public const string Version = \"(\\d+\\.\\d+\\.\\d+)\";");
+                Version vNew, vNow;
+                if (!m.Success || !Version.TryParse(m.Groups[1].Value, out vNew) || !Version.TryParse(Program.Version, out vNow))
+                    throw new Refused(4, "Can't read the package's version - not installing.");
+                if (vNew <= vNow && !o.AllowDowngrade)
+                    throw new Refused(3, "The package is LoopMedic " + vNew + ", not newer than the installed " + vNow +
+                                         " - not installing. (Going back on purpose? Run Install.bat from the older release.)");
+                Say("Signature OK. LoopMedic " + vNow + " -> " + vNew + ".");
+
+                // Full path to Windows PowerShell, and only Windows' own module folders: the user's Documents
+                // module folder is user-writable and would otherwise be searched first by this admin PowerShell.
+                string psDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0");
+                string ps = Path.Combine(psDir, "powershell.exe");
+                string args = "-NoProfile -ExecutionPolicy Bypass -File " + Watchdog.Quote(script) + (o.AllowDowngrade ? " -AllowDowngrade" : "");
+                if (dry) { Say("DRY RUN - would run: " + ps + " " + args); return 0; }
+                var psi = new ProcessStartInfo(ps, args) { UseShellExecute = false, WorkingDirectory = pkgDir };
+                psi.EnvironmentVariables["PSModulePath"] = Path.Combine(psDir, "Modules");
+                Process.Start(psi);   // shares this console window; this exe exits so the installer can replace it
+                return 0;
+            }
+            catch (Refused r) { Fail(r.Message, dry); return r.Code; }
+            catch (Exception e) { Fail("Update failed: " + e.Message, dry); return 6; }
+        }
+
+        static void Say(string text) { Log.Write(text, "[update] "); try { Console.WriteLine(text); } catch { } }
+
+        static void Fail(string text, bool dry)
+        {
+            Log.Write("UPDATE REFUSED: " + text, "[update] ");
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("UPDATE REFUSED: " + text);
+                Console.ResetColor();
+                Console.WriteLine("Your current LoopMedic keeps running.");
+                if (!dry) { Console.WriteLine("Press Enter to close."); Console.ReadLine(); }
+            }
+            catch { }
+        }
+
+        // Admin-only (SYSTEM + Administrators, nothing inherited), created with that security from the start.
+        static void MakeStaging(string stage, bool dry)
+        {
+            if (Directory.Exists(stage))
+            {
+                if ((File.GetAttributes(stage) & FileAttributes.ReparsePoint) != 0) Directory.Delete(stage, false);   // a link: remove the link only
+                else Directory.Delete(stage, true);
+            }
+            if (dry) { Directory.CreateDirectory(stage); return; }
+            var ds = new System.Security.AccessControl.DirectorySecurity();
+            ds.SetAccessRuleProtection(true, false);
+            foreach (var sid in new[] { System.Security.Principal.WellKnownSidType.LocalSystemSid, System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid })
+                ds.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(new System.Security.Principal.SecurityIdentifier(sid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+            Directory.CreateDirectory(stage, ds);
+        }
+
+        // Unzip, refusing anything that would land outside the folder.
+        static void Extract(string zip, string dest)
+        {
+            string root = Path.GetFullPath(dest).TrimEnd('\\') + "\\";
+            using (var z = System.IO.Compression.ZipFile.OpenRead(zip))
+                foreach (var e in z.Entries)
+                {
+                    string target = Path.GetFullPath(Path.Combine(root, e.FullName));
+                    if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase) || Path.IsPathRooted(e.FullName))
+                        throw new Refused(4, "The package has an unexpected file in it (" + e.FullName + ") - not installing.");
+                    if (e.FullName.EndsWith("/") || e.FullName.EndsWith("\\")) { Directory.CreateDirectory(target); continue; }
+                    Directory.CreateDirectory(Path.GetDirectoryName(target));
+                    System.IO.Compression.ZipFileExtensions.ExtractToFile(e, target, false);
+                }
+        }
+
+        // RSA PKCS#1 v1.5 / SHA-256, the release key built into this exe. testKey (tests only, dry runs only):
+        // a JSON file {"n": base64, "e": base64}.
+        static bool Verify(byte[] data, byte[] sig, string testKey)
+        {
+            try
+            {
+                string n = KeyModulus, e = KeyExponent;
+                if (testKey != null) { var k = Json.ReadFile(testKey, 16 * 1024); n = Json.Str(k, "n"); e = Json.Str(k, "e"); }
+                using (var rsa = new System.Security.Cryptography.RSACryptoServiceProvider())
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    rsa.ImportParameters(new System.Security.Cryptography.RSAParameters { Modulus = Convert.FromBase64String(n), Exponent = Convert.FromBase64String(e) });
+                    return rsa.VerifyHash(sha.ComputeHash(data), System.Security.Cryptography.CryptoConfig.MapNameToOID("SHA256"), sig);
+                }
+            }
+            catch { return false; }
         }
     }
 

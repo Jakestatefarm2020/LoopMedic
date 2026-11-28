@@ -1,7 +1,8 @@
 LoopMedic 2.3 for Linux                               by Jacob Stiltner
 ==========================================================================
 
-  Powers your PC off if your AIO pump stops, before the CPU cooks.
+  Powers your PC off if your CPU cooler (AIO pump or air cooler fan)
+  stops, instead of letting the CPU sit at its thermal limit unnoticed.
   Made for CachyOS / Arch with KDE Plasma; works on most systemd distros.
 
   pump STOPS ---> 10 s ---> pop-up with a 30 s countdown ---> power off
@@ -298,8 +299,11 @@ EMAIL ALERTS (optional)
   "none" for a local relay on port 25), "Username", "Password", "To".
   Port 465 isn't supported. Most big providers need an APP PASSWORD.
   Saved changes apply within seconds - no restart. Type the password as
-  plain text: LoopMedic scrambles it at once with a root-only key. A
-  mistake in the file is logged and the previous settings keep working.
+  plain text: LoopMedic obfuscates it at once with a key stored on this
+  PC (root-only), so it isn't readable at a glance. That isn't real
+  protection: root can recover it, so use an APP PASSWORD, not your
+  main one. A mistake in the file is logged and the previous settings
+  keep working.
   Then tray menu > Send a test email.
 
 
@@ -316,6 +320,8 @@ CHANGE SETTINGS / REMOVE
       CpuMaxTempC            0 or a silly value doesn't turn it off - the
                              table's value for your CPU (or 95 C) is used
       CpuHotSeconds
+      NeverSpunTripC (0 = limit - 15), NeverSpunMaxLoad (25)   pump read 0
+                             since boot + CPU that hot at light load = trip
       ShutdownDelaySeconds (30), HotShutdownDelaySeconds (5)
       CoolerType ("aio"; "air" = watch the CPU fan)
       EarlyWarning (false), HealthWarnPercent (12), HealthLearnDays (5)

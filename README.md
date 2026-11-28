@@ -1,7 +1,8 @@
 # LoopMedic
 
-**Powers your PC off if your CPU cooler stops, before the CPU cooks.** Works with AIO / water coolers
-(it watches the pump) and air coolers (it watches the CPU fan). Setup asks which one you have.
+**Powers your PC off if your CPU cooler stops, instead of letting the CPU sit at its thermal limit
+unnoticed.** Works with AIO / water coolers (it watches the pump) and air coolers (it watches the CPU
+fan). Setup asks which one you have.
 
 <p align="center"><img src="docs/panel.png" alt="The LoopMedic tray panel: live pump speed and CPU temperature with graphs, trip limits, today's peaks and every fan header" width="340"></p>
 

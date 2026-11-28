@@ -32,7 +32,7 @@ OPT = "/opt/loopmedic"
 ETC_CFG = "/etc/loopmedic/config.json"
 ETC_MAIL = "/etc/loopmedic/mail.json"
 MAIL_TEMPLATE = """{
-  "_read_me": "LoopMedic email alerts (optional). Fill in your mail server, set Enabled to true and save (sudo nano /etc/loopmedic/mail.json). LoopMedic picks up the change within seconds - no restart. Type the password as plain text: LoopMedic scrambles it as soon as it sees it (the key is root-only). Then use the tray menu > Send a test email.",
+  "_read_me": "LoopMedic email alerts (optional). Fill in your mail server, set Enabled to true and save (sudo nano /etc/loopmedic/mail.json). LoopMedic picks up the change within seconds - no restart. Type the password as plain text: LoopMedic obfuscates it as soon as it sees it (the key is root-only, so root can still recover it: use an app password). Then use the tray menu > Send a test email.",
   "_security": "starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.",
   "_tip": "Gmail, Outlook and most big providers need an app password here, not your normal password. To = one address, or several separated by commas.",
   "Enabled": false,
@@ -446,7 +446,7 @@ def setup_mail():
         password = gp.getpass("Password or app password (hidden): ")
         to = input(f"Send alerts to (Enter = {user}): ").strip() or user
         mail = {"_read_me": "LoopMedic email alerts. Edit with: sudo nano /etc/loopmedic/mail.json - LoopMedic picks up changes within seconds. "
-                            "To change the password, type it into Password as plain text - LoopMedic scrambles it straight away.",
+                            "To change the password, type it into Password as plain text - LoopMedic obfuscates it straight away (root can still recover it: use an app password).",
                 "_security": "starttls = port 587 (most providers). none = port 25 (a local relay with no encryption). Port 465 (SSL) is not supported.",
                 "Enabled": True, "Server": server, "Port": port, "Security": security, "Username": user, "Password": password,
                 "From": user, "To": to}
@@ -501,7 +501,17 @@ def install(cfg_path, with_tray, mail_text=None):
     subprocess.run(["tail", "-n", "5", "/var/log/loopmedic/loopmedic.log"])
 
 
-def update_as_root(user, group):
+def installed_version():
+    """The version in /opt/loopmedic/loopmedic.py, or None."""
+    try:
+        with open(os.path.join(OPT, "loopmedic.py"), encoding="utf-8") as f:
+            m = re.search(r'^VERSION = "(\d+\.\d+\.\d+)"', f.read(), re.M)
+        return tuple(int(p) for p in m.group(1).split(".")) if m else None
+    except OSError:
+        return None
+
+
+def update_as_root(user, group, allow_downgrade=False):
     """The tray's "update now": started through pkexec after the new version's signature checked out.
     Keeps the settings in /etc/loopmedic/config.json (adds any new setting with its default), installs the
     new files and restarts the service. The tray restarts itself afterwards."""
@@ -509,6 +519,10 @@ def update_as_root(user, group):
         raise RuntimeError("--update-root must run as root (the tray starts it through pkexec)")
     if not os.path.exists(ETC_CFG):
         raise RuntimeError("LoopMedic isn't installed here - run install.sh instead")
+    now = installed_version()
+    if now and tuple(int(p) for p in pg.VERSION.split(".")) <= now and not allow_downgrade:
+        raise RuntimeError(f"this package is LoopMedic {pg.VERSION}, not newer than the installed "
+                           f"{'.'.join(map(str, now))} (going back on purpose? add --allow-downgrade, or run install.sh)")
     mine = json.load(open(ETC_CFG, encoding="utf-8"))
     defaults = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
     for k, v in defaults.items():
@@ -557,13 +571,14 @@ def main():
     ap.add_argument("--update-root", action="store_true", help=argparse.SUPPRESS)   # the tray's updater (via pkexec)
     ap.add_argument("--user", help=argparse.SUPPRESS)
     ap.add_argument("--group", help=argparse.SUPPRESS)
+    ap.add_argument("--allow-downgrade", action="store_true", help=argparse.SUPPRESS)   # --update-root: deliberate rollback
     a = ap.parse_args()
 
     if a.update_root:
         if not (a.user and a.group and re.fullmatch(r"[A-Za-z0-9._-]+", a.user) and re.fullmatch(r"[A-Za-z0-9._-]+", a.group)):
             say("--update-root needs --user and --group", "red")
             return 2
-        update_as_root(a.user, a.group)
+        update_as_root(a.user, a.group, a.allow_downgrade)
         return 0
 
     if a.watch:

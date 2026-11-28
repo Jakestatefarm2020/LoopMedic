@@ -6,7 +6,7 @@ Runs the real loopmedic/loopmedic.py against fake /sys + /proc trees in throwawa
     python3 tests/run-tests.py               all scenarios (in parallel, ~1.5 min)
     python3 tests/run-tests.py spike cancel  only the ones whose names contain these words
 """
-import base64, json, os, socket, socketserver, subprocess, sys, tempfile, threading, time
+import base64, json, os, re, socket, socketserver, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +23,16 @@ def w(path, text):
     with open(tmp, "w") as f:
         f.write(str(text))
     os.replace(tmp, path)
+
+
+def retry(fn):
+    """Windows only: the service may have the fake sysfs file open for a moment (real Linux has no such lock)."""
+    for _ in range(20):
+        try:
+            return fn()
+        except PermissionError:
+            time.sleep(0.05)
+    return fn()
 
 
 class Rig:
@@ -45,11 +55,33 @@ class Rig:
         os.makedirs(os.path.join(self.root, "control"), exist_ok=True)
         self.proc = None
 
+    def set_load(self, pct):
+        """A fake /proc/stat whose counters keep ticking at pct % busy (CpuLoad needs two different readings)."""
+        self.load_pct = pct
+        if getattr(self, "_ticker", None):
+            return
+        import threading
+        path = os.path.join(self.root, "proc", "stat")
+        self._stop = threading.Event()
+
+        def tick():
+            busy = idle = 1000
+            while not self._stop.is_set():
+                busy += self.load_pct; idle += 100 - self.load_pct
+                try:
+                    with open(path, "w") as f:
+                        f.write(f"cpu  {busy} 0 0 {idle} 0 0 0 0 0 0\n")
+                except OSError:
+                    pass
+                time.sleep(0.25)
+        self._ticker = threading.Thread(target=tick, daemon=True)
+        self._ticker.start()
+
     def set_pump(self, v):
-        w(os.path.join(self.h, "hwmon1", "fan2_input"), int(v))
+        retry(lambda: w(os.path.join(self.h, "hwmon1", "fan2_input"), int(v)))
 
     def remove_pump(self):
-        os.remove(os.path.join(self.h, "hwmon1", "fan2_input"))
+        retry(lambda: os.remove(os.path.join(self.h, "hwmon1", "fan2_input")))
 
     def set_temp(self, c):
         w(os.path.join(self.h, "hwmon0", "temp1_input"), int(c * 1000))
@@ -131,6 +163,41 @@ def t_pump_stops_cool_then_warms():
     r.wait(); p = []
     expect(s1 == "WATCHING", f"stopped while cool: {s1}, want WATCHING (60 s allowed)", p)
     expect(s2 == "TRIPPED", f"after CPU warmed: {s2}", p)
+    return p
+
+
+def t_stall_with_failed_reads_trips():
+    r = Rig("stall_failed_reads", temp=70).start(duration=26)
+    time.sleep(5)
+    for _ in range(8):                      # dying tach: 0, no reading, 0, no reading ... (~12 s)
+        r.set_pump(0); time.sleep(0.75)
+        r.remove_pump(); time.sleep(0.75)
+    s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "TRIPPED" and s.get("tripKind") == "pump", f"0 / failed reads: {s['state']}/{s.get('tripKind')}, want a pump trip", p)
+    return p
+
+
+def t_single_failed_read_ignored():
+    r = Rig("single_failed_read", temp=50).start(duration=14)
+    time.sleep(5); r.remove_pump()
+    time.sleep(1.5); r.set_pump(2400)
+    time.sleep(4); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "ARMED", f"one failed read while healthy: {s['state']}, want ARMED", p)
+    expect("stopped:" not in log and "would power off" not in log, "no stall started, no trip", p)
+    return p
+
+
+def t_stall_then_real_recovery():
+    r = Rig("stall_recovers", temp=50).start(duration=20)
+    time.sleep(5); r.set_pump(0)
+    time.sleep(2); r.remove_pump()          # a failed read mid-stall keeps the timer
+    time.sleep(1.5); r.set_pump(2400)
+    time.sleep(8); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect("recovered" in log, "real reading above the stopped line -> recovered", p)
+    expect(s["state"] == "ARMED" and "would power off" not in log, f"timer cleared, no trip ({s['state']})", p)
     return p
 
 
@@ -296,6 +363,229 @@ def t_monthly_selftest():
     expect("Monthly self-test OK" in log, "first self-test OK", p)
     expect("Monthly self-test FAILED" in log, "second self-test FAILED", p)
     expect(any("self-test FAILED" in d for d in st.get("degraded", [])), "failure shows as DEGRADED", p)
+    return p
+
+
+def t_never_spun_hot_idle_trips():
+    r = Rig("ns_trip", pump=0, temp=80, CpuHotSeconds=6)
+    r.set_load(10)                         # dead pump from boot, CPU hot while nearly idle
+    r.start(duration=20)
+    time.sleep(16); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "TRIPPED" and s.get("tripKind") == "neverspun", f"never-spun trip: {s['state']}/{s.get('tripKind')}", p)
+    expect("hasn't spun since boot" in log and "would power off" in log, "trip logged with its reason", p)
+    return p
+
+
+def t_never_spun_cool_warns_only():
+    r = Rig("ns_cool", pump=0, temp=45, CpuHotSeconds=6)
+    r.set_load(10)                         # cable on the wrong header, cooler fine
+    r.start(duration=16)
+    time.sleep(12); s = r.status()
+    r.wait(); log = r.log(); p = []
+    expect(s["state"] == "DEGRADED", f"cool CPU: {s['state']}, want DEGRADED (warning only)", p)
+    expect("since boot - cable moved?" in log and "would power off" not in log, "warned, never tripped", p)
+    return p
+
+
+def t_never_spun_busy_cpu_no_trip():
+    r = Rig("ns_busy", pump=0, temp=82, CpuHotSeconds=6)
+    r.set_load(80)                         # misplugged pump while gaming: hot because busy
+    r.start(duration=18)
+    time.sleep(14); s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "DEGRADED", f"busy CPU: {s['state']}, want DEGRADED", p)
+    expect("would power off" not in r.log(), "a busy CPU is left to the normal CPU trip", p)
+    return p
+
+
+def t_never_spun_no_load_sensor():
+    r = Rig("ns_noload", pump=0, temp=80, CpuHotSeconds=6).start(duration=16)
+    time.sleep(12); s = r.status()
+    r.wait(); p = []
+    expect(s["state"] == "DEGRADED" and "would power off" not in r.log(), f"no load reading -> warning only ({s['state']})", p)
+    return p
+
+
+def t_never_spun_boot_loop_guard():
+    r = Rig("ns_guard", pump=0, temp=80, CpuHotSeconds=6)
+    r.set_load(10)
+    w(os.path.join(r.root, "last-poweroff.json"), json.dumps({"at": datetime.now().astimezone().isoformat(), "reason": "pump hasn't spun since boot",
+                                        "kind": "neverspun", "armed": True, "reported": False}))
+    r.start(duration=26)
+    time.sleep(16); s1 = r.status()
+    r.set_pump(2400)                       # pump fixed -> guard cleared
+    r.wait(); log1 = r.log(); p = []
+    with open(os.path.join(r.root, "last-poweroff.json")) as f:
+        lp = json.load(f)
+    expect(s1["state"] == "DEGRADED", f"guarded boot: {s1['state']}, want DEGRADED (no trip)", p)
+    expect(any("already powered off once" in d for d in s1.get("degraded", [])), "tray gets the guard warning", p)
+    expect("NOT powering off" in log1 and "would power off" not in log1, "alarm only, no power-off", p)
+    expect(lp.get("cleared") is True and "armed again" in log1, f"pump spun -> guard cleared ({lp})", p)
+    # next boot with the pump dead again: the rule works normally
+    r.set_pump(0)
+    r.start(duration=20)
+    time.sleep(16); s2 = r.status()
+    r.wait()
+    expect(s2.get("tripKind") == "neverspun", f"after the guard cleared it trips again ({s2['state']}/{s2.get('tripKind')})", p)
+    return p
+
+
+# ---------------------------------------------------------------- updates: a throwaway signing key
+# Plain-Python RSA, made fresh for each test run. The real release key is never used by the tests.
+_TEST_KEY = None
+_TEST_KEY_LOCK = threading.Lock()
+
+
+def test_key():
+    with _TEST_KEY_LOCK:                     # scenarios run in parallel: make the key once
+        if not _TEST_KEY:
+            _make_test_key()
+        return _TEST_KEY
+
+
+def _make_test_key():
+    global _TEST_KEY
+    import hashlib, random
+    rnd = random.SystemRandom()
+
+    def is_prime(n):
+        if n % 2 == 0:
+            return False
+        d, r = n - 1, 0
+        while d % 2 == 0:
+            d, r = d // 2, r + 1
+        for _ in range(24):
+            x = pow(rnd.randrange(2, n - 1), d, n)
+            if x in (1, n - 1):
+                continue
+            for _ in range(r - 1):
+                x = pow(x, 2, n)
+                if x == n - 1:
+                    break
+            else:
+                return False
+        return True
+
+    def prime(bits):
+        while True:
+            c = rnd.getrandbits(bits) | (3 << (bits - 2)) | 1
+            if all(c % p for p in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)) and is_prime(c):
+                return c
+    e = 65537
+    while True:
+        p, q = prime(512), prime(512)
+        phi = (p - 1) * (q - 1)
+        if p != q and phi % e:
+            break
+    n = p * q
+    path = os.path.join(BASE, "test-key.json")
+    k = (n.bit_length() + 7) // 8
+    with open(path, "w") as f:
+        json.dump({"n": base64.b64encode(n.to_bytes(k, "big")).decode(), "e": base64.b64encode(e.to_bytes(3, "big")).decode()}, f)
+    _TEST_KEY = (n, pow(e, -1, phi), path)
+
+
+def sign(data):
+    import hashlib
+    n, d, _ = test_key()
+    k = (n.bit_length() + 7) // 8
+    di = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(data).digest()
+    em = b"\x00\x01" + b"\xff" * (k - len(di) - 3) + b"\x00" + di
+    return base64.b64encode(pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big"))
+
+
+def repo_version():
+    m = re.search(VERSION_RE, open(VERSION_SRC, encoding="utf-8").read(), re.M)
+    return m.group(1)
+
+
+VERSION_SRC = SRC
+VERSION_RE = r'^VERSION = "(\d+\.\d+\.\d+)"'
+
+
+def update_pkg(name, version, extra=None, tamper=False):
+    """A small signed LoopMedic-Linux.tar.gz (the parts --apply-update looks at). Returns (folder, pkg, sig)."""
+    import io, tarfile
+    d = os.path.join(BASE, name)
+    os.makedirs(d, exist_ok=True)
+    t = os.path.join(d, "LoopMedic-Linux.tar.gz")
+
+    def add(tar, name, text):
+        b = text.encode()
+        ti = tarfile.TarInfo(name)
+        ti.size = len(b)
+        tar.addfile(ti, io.BytesIO(b))
+    files = {"LoopMedic-Linux/loopmedic/loopmedic.py": f'VERSION = "{version}"\n',
+             "LoopMedic-Linux/loopmedic/setup_loopmedic.py": "print('test package')\n"}
+    files.update(extra or {})
+    with tarfile.open(t, "w:gz") as tar:
+        for k, v in files.items():
+            add(tar, k, v)
+    data = open(t, "rb").read()
+    with open(t + ".sig", "wb") as f:
+        f.write(sign(data))
+    if tamper:                               # changed after signing (e.g. swapped before the password prompt)
+        with open(t, "ab") as f:
+            f.write(b"\0" * 16)
+    return d, t, t + ".sig"
+
+
+def apply_update(d, pkg, sig, *extra, dry=True, key=True):
+    args = [sys.executable, SRC, "--apply-update", pkg, sig, "--user", "u", "--group", "g"]
+    if dry:
+        args += ["--apply-dry-run", "--data-dir", d]
+    if key:
+        args += ["--test-key", test_key()[2]]
+    r = subprocess.run(args + list(extra), capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    return r.returncode, r.stdout + r.stderr
+
+
+def t_update_newer_accepted():
+    d, pkg, sig = update_pkg("upd_newer", "9.9.9")
+    rc, out = apply_update(d, pkg, sig)
+    p = []
+    expect(rc == 0 and "would run" in out, f"signed newer package: rc {rc}, {out.strip()[-200:]}", p)
+    expect(os.path.exists(os.path.join(d, "staging", "x", "LoopMedic-Linux", "loopmedic", "setup_loopmedic.py")), "unpacked in staging", p)
+    expect("--allow-downgrade" not in out, "no downgrade switch passed on", p)
+    return p
+
+
+def t_update_tampered_refused():
+    d, pkg, sig = update_pkg("upd_tampered", "9.9.9", tamper=True)
+    rc, out = apply_update(d, pkg, sig)
+    p = []
+    expect(rc == 2 and "signature" in out, f"tampered package: rc {rc}, want 2 (signature)", p)
+    expect(not os.path.exists(os.path.join(d, "staging", "x")), "nothing unpacked", p)
+    return p
+
+
+def t_update_older_refused_and_allow_downgrade():
+    p = []
+    for v in ("1.0.0", repo_version()):
+        d, pkg, sig = update_pkg("upd_old_" + v.replace(".", "_"), v)
+        rc, out = apply_update(d, pkg, sig)
+        expect(rc == 3 and "not newer" in out, f"package {v}: rc {rc}, want 3 (not newer)", p)
+    d, pkg, sig = update_pkg("upd_downgrade", "1.0.0")
+    rc, out = apply_update(d, pkg, sig, "--allow-downgrade")
+    expect(rc == 0 and "--allow-downgrade" in out, f"--allow-downgrade: rc {rc}, {out.strip()[-200:]}", p)
+    return p
+
+
+def t_update_path_escape_refused():
+    d, pkg, sig = update_pkg("upd_escape", "9.9.9", extra={"LoopMedic-Linux/../../escaped.txt": "x"})
+    rc, out = apply_update(d, pkg, sig)
+    p = []
+    expect(rc == 4 and "unexpected file" in out, f"tar with ../: rc {rc}, want 4", p)
+    expect(not os.path.exists(os.path.join(d, "escaped.txt")), "nothing written outside", p)
+    return p
+
+
+def t_update_test_switches_need_dry_run():
+    d, pkg, sig = update_pkg("upd_real_testkey", "9.9.9")
+    rc, out = apply_update(d, pkg, sig, dry=False)        # a real run handed the test key
+    p = []
+    expect(rc == 6 and "can't be used for a real update" in out, f"test key on a real update: rc {rc}, want 6", p)
     return p
 
 

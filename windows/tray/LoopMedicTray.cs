@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("Jacob Stiltner")]
 [assembly: System.Reflection.AssemblyProduct("LoopMedic")]
 [assembly: System.Reflection.AssemblyCopyright("(c) 2026 Jacob Stiltner")]
-[assembly: System.Reflection.AssemblyVersion("2.3.1.0")]
+[assembly: System.Reflection.AssemblyVersion("2.3.2.0")]
 
 namespace LoopMedicTray
 {
@@ -880,8 +880,8 @@ namespace LoopMedicTray
                         using (var fb = new SolidBrush(f.IsPump ? Theme.Accent : Theme.Accent2)) using (var fp = Theme.Rounded(fill, 2.5f * S)) g.FillPath(fb, fp);
                     y += 22 * S;
                 }
-                int empty = st.Fans.Count - live.Count;
-                if (empty > 0) { g.DrawString(empty + " empty header" + (empty == 1 ? "" : "s") + " (0 rpm)", fSmall, bDim, pad, y); y += 18 * S; }
+                // empty headers (0 rpm) aren't listed; say so only if nothing at all is spinning
+                if (live.Count == 0 && st.Fans.Count > 0) { g.DrawString("No fans spinning (all headers 0 rpm)", fSmall, bDim, pad, y); y += 18 * S; }
                 if (st.Fans.Count == 0) { g.DrawString("No fan data yet", fSmall, bDim, pad, y); y += 18 * S; }
 
                 // buttons
@@ -907,8 +907,8 @@ namespace LoopMedicTray
                     g.FillEllipse(ub, pad, y + (th - dot) / 2, dot, dot);
                     g.DrawString(upd, fTiny, ub, pad + dot + 5 * S, y);
                 }
-                var by = g.MeasureString("by Jacob Stiltner", fTiny);
-                g.DrawString("by Jacob Stiltner", fTiny, bDim, W - pad - by.Width, y);
+                var by = g.MeasureString("by Jake", fTiny);
+                g.DrawString("by Jake", fTiny, bDim, W - pad - by.Width, y);
                 y += by.Height + 12 * S;
             }
 
@@ -1046,30 +1046,30 @@ namespace LoopMedicTray
             }) { IsBackground = true }.Start();
         }
 
-        // Download + signature check + unzip. Returns the new version's Update-LoopMedic.ps1, or throws a readable message.
-        public static string Download(Release r, Action<string> progress)
+        // Download + signature check (a fast pre-filter: the elevated step checks again in an admin-only folder).
+        // Returns { zip, sig } paths in %TEMP%, or throws a readable message.
+        public static string[] Download(Release r, Action<string> progress)
         {
             if (r.ZipUrl == null || r.SigUrl == null) throw new Exception("This release has no signed Windows package - download it from GitHub instead.");
             string dir = Path.Combine(Path.GetTempPath(), "LoopMedic-update-" + r.Version);
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
             Directory.CreateDirectory(dir);
             byte[] zip, sig;
+            string sigText;
             using (var wc = Client())
             {
                 progress("Downloading LoopMedic " + r.Version + "...");
                 zip = wc.DownloadData(r.ZipUrl);
-                sig = Convert.FromBase64String(wc.DownloadString(r.SigUrl).Trim());
+                sigText = wc.DownloadString(r.SigUrl).Trim();
+                sig = Convert.FromBase64String(sigText);
             }
             progress("Checking the signature...");
             if (!Verify(zip, sig))
                 throw new Exception("The download FAILED the signature check, so it was not installed. Please tell the author.");
-            string zp = Path.Combine(dir, "LoopMedic.zip");
+            string zp = Path.Combine(dir, "LoopMedic.zip"), sp = Path.Combine(dir, "LoopMedic.zip.sig");
             File.WriteAllBytes(zp, zip);
-            progress("Unpacking...");
-            System.IO.Compression.ZipFile.ExtractToDirectory(zp, Path.Combine(dir, "x"));
-            string script = Path.Combine(dir, "x", "LoopMedic", "Update-LoopMedic.ps1");
-            if (!File.Exists(script)) throw new Exception("The package has no updater - download it from GitHub and run Install.bat.");
-            return script;
+            File.WriteAllText(sp, sigText);
+            return new[] { zp, sp };
         }
 
         public static bool Verify(byte[] data, byte[] sig)
@@ -1160,8 +1160,8 @@ namespace LoopMedicTray
             {
                 try
                 {
-                    string script = Updater.Download(rel, s => app.RunOnUi(delegate { status.Text = s; }));
-                    app.RunOnUi(delegate { Launch(script); });
+                    string[] files = Updater.Download(rel, s => app.RunOnUi(delegate { status.Text = s; }));
+                    app.RunOnUi(delegate { Launch(files[0], files[1]); });
                 }
                 catch (Exception ex)
                 {
@@ -1170,11 +1170,15 @@ namespace LoopMedicTray
             }) { IsBackground = true }.Start();
         }
 
-        void Launch(string script)
+        // The installed LoopMedic.exe (admin-only folder) does the rest as admin: copies both files into an
+        // admin-only staging folder, checks the signature and version again there, then runs the new installer.
+        void Launch(string zip, string sig)
         {
             try
             {
-                Process.Start(new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"") { Verb = "runas", UseShellExecute = true });
+                string exe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LoopMedic.exe");
+                if (!File.Exists(exe)) throw new FileNotFoundException("LoopMedic.exe isn't next to the tray app - run Install.bat from the download instead.");
+                Process.Start(new ProcessStartInfo(exe, "--apply-update --package \"" + zip + "\" --sig \"" + sig + "\"") { Verb = "runas", UseShellExecute = true });
                 status.Text = "Installing - LoopMedic restarts in a moment. You can close this.";
                 bLater.Text = "Close";
                 bLater.Enabled = true;
@@ -1182,6 +1186,12 @@ namespace LoopMedicTray
             catch (System.ComponentModel.Win32Exception)
             {
                 status.Text = "Update cancelled - Windows didn't get admin permission.";
+                status.ForeColor = Theme.WarnText;
+                bUpdate.Enabled = bLater.Enabled = true;
+            }
+            catch (Exception ex)
+            {
+                status.Text = ex.Message;
                 status.ForeColor = Theme.WarnText;
                 bUpdate.Enabled = bLater.Enabled = true;
             }
